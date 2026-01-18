@@ -27,7 +27,7 @@ repo_rules:
   - Verify post-insert row counts; treat 0 rows as an error
 
 # Milestone queue
-milestones:
+milestones: []
   # Example milestone (commented out)
   # - id: milestone-001
   #   title: "Fix TypeScript errors in training module"

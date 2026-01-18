@@ -30,7 +30,7 @@ class Config:
         # Merge configs (reclaim overrides default)
         self.config = {**default_config, **reclaim_config}
         self.truth_checks = self.config.get("truth_checks", [])
-        self.milestones = self.config.get("milestones", [])
+        self.milestones = self.config.get("milestones") or []
         self.repo_rules = self.config.get("repo_rules", [])
         self.max_files = self.config.get("max_files", 3)
         self.max_lines = self.config.get("max_lines", 150)
