@@ -1,0 +1,30 @@
+# Default configuration for Reclaim Agent
+
+# Patch size limits (surgical mode default)
+max_files: 3
+max_lines: 150
+max_attempts: 3
+
+# Repository rules (critical safety constraints)
+repo_rules:
+  - Never force push to branches
+  - Never delete branches
+  - Never modify Supabase migrations or database schema
+  - Never touch auth flow unless milestone explicitly targets it
+  - Default to small diffs, max 3 files/150 lines unless escalation justified
+  - Do NOT disable tests, suppress TypeScript errors, or hide crashes with broad try/catch
+  - Do NOT remove features unless explicitly approved
+  - If uncertain, search the repo before editing
+  - Never invent file paths, exports, or schema fields
+
+# Truth checks (default - can be overridden per repository)
+truth_checks:
+  - name: npm ci
+    command: npm ci
+  - name: TypeScript check
+    command: npx tsc --noEmit
+  - name: Unit tests
+    command: npx vitest run --passWithNoTests
+
+# Milestones (empty by default - add per repository)
+milestones: []

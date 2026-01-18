@@ -1,0 +1,42 @@
+# Reclaim repository-specific configuration
+
+# Inherits all defaults from default.yaml
+
+# Truth checks for Reclaim (app/ subdirectory)
+truth_checks:
+  - name: npm ci
+    command: npm ci
+  - name: TypeScript check
+    command: npx tsc --noEmit
+  - name: Unit tests
+    command: npx vitest run --passWithNoTests
+
+# Repository-specific rules
+repo_rules:
+  - Never force push to branches
+  - Never delete branches
+  - Never modify Supabase migrations or database schema
+  - Never touch auth flow unless milestone explicitly targets it
+  - Default to small diffs, max 3 files/150 lines unless escalation justified
+  - Do NOT disable tests, suppress TypeScript errors, or hide crashes with broad try/catch
+  - Do NOT remove features unless explicitly approved
+  - If uncertain, search the repo before editing
+  - Never invent file paths, exports, or schema fields
+  - Never downgrade hasOnboarded once true
+  - For UUID PK tables: omit id and let DB generate it
+  - Verify post-insert row counts; treat 0 rows as an error
+
+# Milestone queue
+milestones:
+  # Example milestone (commented out)
+  # - id: milestone-001
+  #   title: "Fix TypeScript errors in training module"
+  #   type: fix
+  #   status: todo
+  #   target_files:
+  #     - "app/src/lib/training/**"
+  #   acceptance:
+  #     - "cd app && npx tsc --noEmit"
+  #     - "cd app && npx vitest run --passWithNoTests"
+  #   stop_feature: false
+  #   created_at: "2025-01-18"

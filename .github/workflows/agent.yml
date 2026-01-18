@@ -1,0 +1,43 @@
+name: Reclaim Agent
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Run every 2 hours from 06:00 to 16:00 UTC (08:00 to 18:00 SAST) Mon-Fri
+    - cron: '0 6,8,10,12,14,16 * * 1-5'
+
+jobs:
+  agent:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: IoTWazPresales/reclaim-agent
+          token: ${{ secrets.RECLAIM_GH_TOKEN }}
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Checkout Reclaim repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ vars.RECLAIM_REPO }}
+          token: ${{ secrets.RECLAIM_GH_TOKEN }}
+          path: reclaim-repo
+          ref: ${{ vars.RECLAIM_DEFAULT_BRANCH }}
+
+      - name: Run agent
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          RECLAIM_GH_TOKEN: ${{ secrets.RECLAIM_GH_TOKEN }}
+          RECLAIM_REPO: ${{ vars.RECLAIM_REPO }}
+          RECLAIM_DEFAULT_BRANCH: ${{ vars.RECLAIM_DEFAULT_BRANCH }}
+          RECLAIM_REPO_PATH: ${{ github.workspace }}/reclaim-repo
+        run: |
+          python -m agent.run
