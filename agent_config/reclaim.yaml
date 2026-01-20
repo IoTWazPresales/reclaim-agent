@@ -27,7 +27,8 @@ repo_rules:
   - Verify post-insert row counts; treat 0 rows as an error
 
 # Milestone queue
-milestones:   - id: milestone-001
+milestones:   
+- id: milestone-001
     title: "Training Goals: Engine-Driven Outcome Preview Panel"
     type: feat
     status: todo
