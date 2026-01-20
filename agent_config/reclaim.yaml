@@ -27,8 +27,8 @@ repo_rules:
   - Verify post-insert row counts; treat 0 rows as an error
 
 # Milestone queue
-milestones:   
-- id: milestone-001
+milestones:
+  - id: milestone-001
     title: "Training Goals: Engine-Driven Outcome Preview Panel"
     type: feat
     status: todo
@@ -43,92 +43,74 @@ milestones:
       - "cd app && npx vitest run --passWithNoTests"
     stop_feature: false
     created_at: "2026-01-20"
-
     spec:
       objective: >
         Add a live “Outcome Preview” panel to the Training Goals selection UI that shows users
-        what their CURRENT settings will actually generate.  
-        The preview must be derived directly from the SAME engine used for real program/session generation,
-        not from guessed rules or heuristics.
-
+        what their CURRENT settings will actually generate, derived directly from the SAME engine used
+        for real generation (dry-run, no persistence).
       core_principle: >
-        PREVIEW MUST NEVER LIE.  
-        The preview must always match what the generator would actually produce for the same settings.
-
+        PREVIEW MUST NEVER LIE. Preview must match what the generator would produce for the same settings.
       scope_in:
-        - "Add persistent Preview Panel to the Training Goals screen"
-        - "Preview updates instantly as sliders or settings change"
-        - "Preview is computed by performing a DRY-RUN of the real training generator"
-        - "No database writes or state changes are allowed during preview generation"
-        - "Display summary derived from real generated output: rep ranges, sets, grouping style, AMRAP presence, and example snippet"
-        - "Add small plain-language explanations to help users interpret the preview"
-        - "Add unit tests that confirm preview == actual generation summary"
-
+        - "Persistent preview panel on Training Goals screen; updates instantly"
+        - "Compute preview via dry-run of real generator (no DB writes, no side effects)"
+        - "Summarize from real output: rep ranges, set counts, grouping style, AMRAP presence, example snippet"
+        - "Unit tests: preview summary matches summary of real generation for same settings"
       scope_out:
-        - "Any changes to training engine behavior"
-        - "Any modifications to exercise selection, progression, scheduling, or logic"
-        - "Any database schema changes or migrations"
-        - "Any authentication or onboarding changes"
-
+        - "No changes to training engine behavior"
+        - "No DB schema/migrations"
+        - "No auth changes"
       implementation_approach:
-
         engine_dry_run:
-          description: >
-            Implement a safe dry-run mode for the existing generator so it can be called from the UI
-            without persisting anything.
           requirements:
             - "Call the same generator used for real sessions/programs"
-            - "Use the user’s CURRENT in-memory settings as input"
-            - "Generate a sample session or small plan fragment in memory only"
-            - "No DB inserts, no side effects, no logging writes"
-            - "If context (schedule/day) is required, use a deterministic default such as 'next scheduled day'"
-
+            - "No DB inserts, no persistence, no side effects"
+            - "If a day/context is required, use a deterministic default (e.g., next scheduled day)"
         preview_summary_computation:
-          description: >
-            Derive the preview information from the actual dry-run output.
           must_include:
-            - "Observed rep ranges across main lifts"
-            - "Observed sets per main lift and accessories"
-            - "Observed grouping philosophy based on real exercise ordering"
-            - "Whether AMRAP sets are present in the generated plan"
-            - "A short example snippet taken directly from generated exercises"
-
-        ui_requirements:
-          - "Preview panel must be clearly visible on Training Goals screen"
-          - "Preview must update immediately when sliders change"
-          - "Must fit on small screens without scrolling when possible"
-          - "Language must be clear: 'Example based on your current settings'"
-          - "Do not present preview as a promise of exact future sessions"
-
-      validation_strategy:
-
-        unit_tests:
-          - "Given a set of training settings S"
-          - "Run real generation G = generatePlan(S)"
-          - "Run preview P = computePreview(S)"
-          - "Assert summary(P) matches summary(G)"
-          - "Edge cases: low days/week, mixed goals, beginner profiles"
-
-        integration_checks:
-          - "Changing sliders in UI immediately changes preview"
-          - "Preview is consistent across repeated calls with same inputs"
-          - "No crashes or performance issues on rapid slider movement"
-
+            - "Observed rep ranges"
+            - "Observed set counts (main + accessory)"
+            - "Grouping philosophy inferred from actual ordering"
+            - "AMRAP presence"
+            - "Example snippet taken from generated output"
       acceptance_criteria:
-        - "User can see a clear outcome preview before saving goals"
-        - "Preview is always derived from real generator output"
-        - "Preview never contradicts generated plans"
-        - "No existing training behavior is altered"
-        - "Tests verify preview accuracy against generator"
+        - "Preview visible before saving goals"
+        - "Preview derived from generator output (no heuristics)"
+        - "Preview never contradicts generated plan"
+        - "No training behavior changes"
+        - "tsc + vitest pass"
 
-      definition_of_done:
-        - "Preview panel implemented and styled"
-        - "Dry-run generator mode implemented safely"
-        - "Preview logic unit tested and passing"
-        - "No regressions in current training features"
-        - "Ready for Maestro validation once login automation is available"
-
-      notes:
-        - "Avoid large refactors; wrap existing generator where possible"
-        - "Keep diffs small and surgical"
-        - "If generator cannot be dry-run safely, propose minimal refactor plan before proceeding"
+  - id: milestone-002
+    title: "Training Setup: Muscle Frequency Preference (1x vs 2x per week)"
+    type: feat
+    status: todo
+    target_files:
+      - "app/src/screens/**"
+      - "app/src/lib/training/**"
+      - "app/src/state/**"
+      - "app/src/services/**"
+    acceptance:
+      - "cd app && npm ci"
+      - "cd app && npx tsc --noEmit"
+      - "cd app && npx vitest run --passWithNoTests"
+    stop_feature: false
+    created_at: "2026-01-20"
+    spec:
+      objective: >
+        Add a simple user preference (once/twice/auto) for weekly muscle frequency and use it as a constraint/bias
+        in split selection/scheduling, with guardrails and graceful fallback when infeasible.
+      scope_in:
+        - "UI control once/twice/auto; default auto"
+        - "Persist preference with existing training settings"
+        - "Bias split selection: twice -> Upper/Lower or Full Body (depending on days/week)"
+        - "If infeasible, fall back to auto and surface note"
+        - "Update preview (M1) to reflect frequency intent"
+      scope_out:
+        - "No advanced customization beyond frequency"
+        - "No DB schema/migrations"
+        - "No auth changes"
+      acceptance_criteria:
+        - "Preference persists"
+        - "When feasible, generated split reflects choice"
+        - "When infeasible, app explains and remains functional"
+        - "Existing users on auto unaffected"
+        - "tsc + vitest pass"
