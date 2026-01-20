@@ -113,10 +113,9 @@ def _env_flag(name: str) -> bool:
 
 def _extract_text_from_responses_api(payload: dict) -> str:
     """
-    Extracts the primary text output from OpenAI Responses API JSON.
+    Extract the primary text output from OpenAI Responses API JSON.
     Supports common response shapes.
     """
-    # Preferred: output_text convenience field (some SDKs provide; API often does not)
     if isinstance(payload.get("output_text"), str) and payload["output_text"].strip():
         return payload["output_text"].strip()
 
@@ -124,7 +123,6 @@ def _extract_text_from_responses_api(payload: dict) -> str:
     if isinstance(output, list):
         chunks: list[str] = []
         for item in output:
-            # item can have "content": [{ "type": "output_text", "text": "..."}, ...]
             content = item.get("content")
             if isinstance(content, list):
                 for c in content:
@@ -134,8 +132,6 @@ def _extract_text_from_responses_api(payload: dict) -> str:
         if text:
             return text
 
-    # Fallback: some variants return { "choices": ... } or other formats
-    # but we keep it conservative: stringify if nothing else.
     return ""
 
 
@@ -158,24 +154,24 @@ def call_openai(prompt: str, api_key: str) -> Optional[str]:
         "Content-Type": "application/json",
     }
 
-    # Responses API format
-    data = {
-    "model": model,
-    "input": [
-        {"role": "system", "content": "You are a code modification agent that outputs only unified diff patches."},
-        {"role": "user", "content": prompt},
-    ],
-    "max_output_tokens": 4000,
-}
+    # Responses API format (do NOT include temperature by default; some models reject it)
+    data: Dict[str, Any] = {
+        "model": model,
+        "input": [
+            {"role": "system", "content": "You are a code modification agent that outputs only unified diff patches."},
+            {"role": "user", "content": prompt},
+        ],
+        "max_output_tokens": 4000,
+    }
 
-# Some models (incl. codex-style) reject temperature. Only include if explicitly set.
-temp = os.getenv("OPENAI_TEMPERATURE", "").strip()
-if temp:
-    try:
-        data["temperature"] = float(temp)
-    except ValueError:
-        # ignore invalid env values
-        pass
+    # Only include temperature if explicitly provided (and parseable)
+    temp = os.getenv("OPENAI_TEMPERATURE", "").strip()
+    if temp:
+        try:
+            data["temperature"] = float(temp)
+        except ValueError:
+            # ignore invalid env values
+            pass
 
     retries = 3
     backoff_s = 2
@@ -208,7 +204,7 @@ if temp:
                 except Exception:
                     print(f"[AGENT_DEBUG] OpenAI error text: {response.text[:2000]}")
 
-            # Extract error code if present
+            # Try parse error JSON if not already
             if err_json is None:
                 try:
                     err_json = response.json()
