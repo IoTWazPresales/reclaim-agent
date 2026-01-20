@@ -160,14 +160,22 @@ def call_openai(prompt: str, api_key: str) -> Optional[str]:
 
     # Responses API format
     data = {
-        "model": model,
-        "input": [
-            {"role": "system", "content": "You are a code modification agent that outputs only unified diff patches."},
-            {"role": "user", "content": prompt},
-        ],
-        "temperature": 0.1,
-        "max_output_tokens": 4000,
-    }
+    "model": model,
+    "input": [
+        {"role": "system", "content": "You are a code modification agent that outputs only unified diff patches."},
+        {"role": "user", "content": prompt},
+    ],
+    "max_output_tokens": 4000,
+}
+
+# Some models (incl. codex-style) reject temperature. Only include if explicitly set.
+temp = os.getenv("OPENAI_TEMPERATURE", "").strip()
+if temp:
+    try:
+        data["temperature"] = float(temp)
+    except ValueError:
+        # ignore invalid env values
+        pass
 
     retries = 3
     backoff_s = 2
