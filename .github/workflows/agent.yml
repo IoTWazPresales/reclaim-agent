@@ -41,6 +41,7 @@ jobs:
           RECLAIM_REPO_PATH: ${{ github.workspace }}/reclaim-repo
           LOG_LEVEL: DEBUG
           AGENT_DEBUG: "1"
+          AGENT_STRICT: "1"
           PYTHONUNBUFFERED: "1"
         run: |
           python -m agent.run
