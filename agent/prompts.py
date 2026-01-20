@@ -4,7 +4,8 @@ Defensive OpenAI caller:
 - Uses Responses API (v1/responses).
 - Extracts text from multiple payload shapes (including payload["text"]).
 - Retries automatically when the response is incomplete due to max_output_tokens.
-- Avoids sending unsupported parameters unless explicitly configured.
+- Uses adaptive timeouts for large max_output_tokens to avoid ReadTimeout.
+- Nudges model to emit TEXT (diff) rather than spending all tokens on reasoning.
 """
 
 from __future__ import annotations
@@ -80,6 +81,7 @@ def build_milestone_prompt(
 
     rules_text = "\n".join([f"- {rule}" for rule in repo_rules])
 
+    # Strong “emit diff now” directive (helps prevent wasting 100% on reasoning)
     return f"""You are a code modification agent for the Reclaim repository. Complete the milestone task below.
 
 REPO RULES (CRITICAL - MUST FOLLOW):
@@ -92,19 +94,16 @@ Acceptance Criteria (all must pass):
 {acceptance}
 {files_context}
 
+CRITICAL OUTPUT REQUIREMENT:
+- You MUST output ONLY a unified diff patch.
+- DO NOT output analysis, reasoning, explanations, or markdown fences.
+- Start your very first character with `--- a/` (the diff header).
+
 CONSTRAINTS:
 - Maximum {max_files} files changed
 - Maximum {max_lines} lines net change (additions - deletions)
-- Output ONLY a unified diff patch in the following format:
-  - Start with `--- a/path/to/file`
-  - Follow with `+++ b/path/to/file`
-  - Include context lines before/after changes
-  - Use standard unified diff format
 
 OUTPUT FORMAT:
-Provide a unified diff patch ONLY. Do not include explanations, comments, or markdown formatting.
-Start immediately with the diff:
-
 --- a/path/to/file
 +++ b/path/to/file
 @@ -line,count +line,count @@
@@ -129,29 +128,24 @@ def _extract_text_from_responses_api(payload: dict) -> str:
     """
     Extract primary text from Responses API payload.
 
-    We support:
+    Supports:
     - payload["output_text"] (convenience)
-    - payload["text"]["value"] / payload["text"]["content"] (common streaming container)
-    - payload["output"][...]["content"][...]["text"] (message content blocks)
-    - payload["output"][...]["text"] (direct text chunks)
+    - payload["text"]["value"] / payload["text"]["content"]
+    - payload["output"][...]["content"][...]["text"]
+    - payload["output"][...]["text"]
     """
-    # 1) Convenience field
     ot = payload.get("output_text")
     if isinstance(ot, str) and ot.strip():
         return ot.strip()
 
-    # 2) Common top-level text container (your log shows "text": {"format": ...})
     t = payload.get("text")
     if isinstance(t, dict):
-        # Some variants use "value"
         v = t.get("value")
         if isinstance(v, str) and v.strip():
             return v.strip()
-        # Others use "content"
         c = t.get("content")
         if isinstance(c, str) and c.strip():
             return c.strip()
-        # Some use a nested array
         arr = t.get("chunks") or t.get("parts")
         if isinstance(arr, list):
             chunks = []
@@ -164,7 +158,6 @@ def _extract_text_from_responses_api(payload: dict) -> str:
             if joined:
                 return joined
 
-    # 3) output list parsing
     output = payload.get("output")
     if isinstance(output, list):
         chunks: List[str] = []
@@ -172,14 +165,12 @@ def _extract_text_from_responses_api(payload: dict) -> str:
             if not isinstance(item, dict):
                 continue
 
-            # Direct chunk
             if item.get("type") in ("output_text", "text") and isinstance(item.get("text"), str):
                 txt = item["text"].strip()
                 if txt:
                     chunks.append(txt)
                 continue
 
-            # Message content array
             content = item.get("content")
             if isinstance(content, list):
                 for part in content:
@@ -201,8 +192,10 @@ def call_openai(prompt: str, api_key: str) -> Optional[str]:
     """
     Call OpenAI Responses API and return unified diff text.
 
-    Key reliability feature:
-    - If response.status == "incomplete" due to "max_output_tokens", retry once with higher token budget.
+    Reliability:
+    - Adaptive timeouts (bigger outputs take longer).
+    - If response is incomplete due to max_output_tokens, bump gradually (4k->8k->16k by default).
+    - Nudges model toward text output: reasoning effort low, verbosity low.
     """
     import requests
 
@@ -212,41 +205,64 @@ def call_openai(prompt: str, api_key: str) -> Optional[str]:
     base = os.getenv("OPENAI_ENDPOINT", "").strip() or "https://api.openai.com"
     url = f"{base}/v1/responses"
 
-    # Timeouts
-    timeout_s = 90
-    t = os.getenv("OPENAI_TIMEOUT_S", "").strip()
-    if t:
+    # timeouts: separate connect + read timeout for better control
+    connect_timeout_s = 15
+    read_timeout_s = 120  # default read timeout (bigger than 90)
+    ct = os.getenv("OPENAI_CONNECT_TIMEOUT_S", "").strip()
+    rt = os.getenv("OPENAI_READ_TIMEOUT_S", "").strip()
+    if ct:
         try:
-            timeout_s = int(t)
+            connect_timeout_s = int(ct)
         except Exception:
-            timeout_s = 90
+            pass
+    if rt:
+        try:
+            read_timeout_s = int(rt)
+        except Exception:
+            pass
 
-    # Initial output token budget
+    # output token budget
     max_out = 4000
     mo = os.getenv("OPENAI_MAX_OUTPUT_TOKENS", "").strip()
     if mo:
         try:
             max_out = int(mo)
         except Exception:
-            max_out = 4000
+            pass
+
+    # cap and bump schedule
+    bump_cap = int(os.getenv("OPENAI_MAX_OUTPUT_TOKENS_CAP", "").strip() or "20000")
+    bump_steps_env = os.getenv("OPENAI_BUMP_STEPS", "").strip()
+    if bump_steps_env:
+        # e.g. "8000,12000,16000"
+        try:
+            bump_steps = [int(x.strip()) for x in bump_steps_env.split(",") if x.strip()]
+            bump_steps = [x for x in bump_steps if x > 0]
+        except Exception:
+            bump_steps = [8000, 16000]
+    else:
+        bump_steps = [8000, 16000]
 
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
 
-    # Base request payload builder
     def make_data(max_output_tokens: int) -> Dict[str, Any]:
         data: Dict[str, Any] = {
             "model": model,
             "input": [
-                {"role": "system", "content": "You are a code modification agent that outputs only unified diff patches."},
+                {"role": "system", "content": "Output ONLY a unified diff patch. Start immediately with `--- a/`."},
                 {"role": "user", "content": prompt},
             ],
             "max_output_tokens": max_output_tokens,
+
+            # These strongly bias the model away from spending everything on reasoning.
+            "reasoning": {"effort": "low"},
+            "text": {"verbosity": "low"},
         }
 
-        # Only include temperature if explicitly set (some models reject it)
+        # Only include temperature if explicitly set; some models reject it.
         temp = os.getenv("OPENAI_TEMPERATURE", "").strip()
         if temp:
             try:
@@ -254,28 +270,35 @@ def call_openai(prompt: str, api_key: str) -> Optional[str]:
             except ValueError:
                 pass
 
-        # If you want to try to reduce reasoning overhead, uncomment this.
-        # Some model families honor it; others ignore it.
-        # data["reasoning"] = {"effort": "low"}
-
         return data
 
     retries = 3
     backoff_s = 2
 
-    # We will allow ONE “incomplete due to tokens” retry with a bigger budget
-    # (within a safe cap so you don’t explode costs).
-    bumped_once = False
-    bump_cap = int(os.getenv("OPENAI_MAX_OUTPUT_TOKENS_CAP", "").strip() or "20000")
+    # track which bump step we’re on
+    bump_index = -1  # means "no bump applied yet"
 
     for attempt in range(1, retries + 1):
         try:
+            # Adaptive read timeout: scale with max_out (very rough but works)
+            # Example: 4k -> 120s, 8k -> 180s, 16k -> 300s
+            adaptive_read = read_timeout_s
+            if max_out >= 8000:
+                adaptive_read = max(read_timeout_s, 180)
+            if max_out >= 16000:
+                adaptive_read = max(read_timeout_s, 300)
+
+            timeout = (connect_timeout_s, adaptive_read)
+
             data = make_data(max_out)
 
             if debug:
-                print(f"[AGENT_DEBUG] OpenAI request: endpoint=v1/responses model={model} attempt={attempt}/{retries} max_output_tokens={max_out}")
+                print(
+                    f"[AGENT_DEBUG] OpenAI request: endpoint=v1/responses model={model} "
+                    f"attempt={attempt}/{retries} max_output_tokens={max_out} timeout={timeout}"
+                )
 
-            response = requests.post(url, headers=headers, json=data, timeout=timeout_s)
+            response = requests.post(url, headers=headers, json=data, timeout=timeout)
             status_code = response.status_code
 
             if status_code == 200:
@@ -290,28 +313,38 @@ def call_openai(prompt: str, api_key: str) -> Optional[str]:
                     if not extracted:
                         print(f"[AGENT_DEBUG] OpenAI raw response (first 2000 chars): {_safe_trunc(raw, 2000)}")
 
-                # If we got text, return it
                 if extracted and extracted.strip():
                     return extracted.strip()
 
-                # If incomplete due to max_output_tokens, bump and retry once immediately.
+                # Handle incomplete due to max_output_tokens: bump gradually
                 resp_status = payload.get("status")
                 inc = payload.get("incomplete_details") or {}
                 reason = inc.get("reason")
 
-                if (resp_status == "incomplete" and reason == "max_output_tokens" and not bumped_once):
-                    bumped_once = True
-                    # Heuristic: 4000 -> 12000 (or x3), capped
-                    new_budget = min(max_out * 3, bump_cap)
-                    if debug:
-                        print(f"[AGENT_DEBUG] Response incomplete due to max_output_tokens. Bumping max_output_tokens {max_out} -> {new_budget} and retrying once.")
-                    max_out = new_budget
-                    # Don’t consume the attempt; just continue loop (same attempt count OK).
-                    continue
+                if resp_status == "incomplete" and reason == "max_output_tokens":
+                    # bump step
+                    next_budget = None
+
+                    # first try: pick next from bump_steps if available
+                    if bump_index + 1 < len(bump_steps):
+                        bump_index += 1
+                        next_budget = bump_steps[bump_index]
+                    else:
+                        # fallback: x2, capped
+                        next_budget = min(max_out * 2, bump_cap)
+
+                    next_budget = min(next_budget, bump_cap)
+
+                    if next_budget > max_out:
+                        if debug:
+                            print(f"[AGENT_DEBUG] Incomplete due to max_output_tokens. Bumping {max_out} -> {next_budget} and retrying.")
+                        max_out = next_budget
+                        # Retry immediately without consuming attempt count further (we just continue)
+                        continue
 
                 return None
 
-            # Non-200
+            # Non-200 handling
             err_json = None
             if debug:
                 print(f"[AGENT_DEBUG] OpenAI non-200 status={status_code}")
@@ -321,7 +354,6 @@ def call_openai(prompt: str, api_key: str) -> Optional[str]:
                 except Exception:
                     print(f"[AGENT_DEBUG] OpenAI error text: {_safe_trunc(response.text, 2000)}")
 
-            # Parse error code
             if err_json is None:
                 try:
                     err_json = response.json()
@@ -337,12 +369,25 @@ def call_openai(prompt: str, api_key: str) -> Optional[str]:
                 print("OpenAI quota exhausted / billing not active for this API key (insufficient_quota).")
                 return None
 
-            # Retry transient
             if status_code in (429, 500, 502, 503, 504) and attempt < retries:
                 time.sleep(backoff_s)
                 backoff_s *= 2
                 continue
 
+            return None
+
+        except requests.exceptions.ReadTimeout as e:
+            if debug:
+                print(f"[AGENT_DEBUG] OpenAI ReadTimeout: {e}")
+
+            # On ReadTimeout, we retry, but also increase read timeout a bit for next attempt.
+            # (Don’t mutate env; just local default ramp.)
+            read_timeout_s = max(read_timeout_s, 240)
+
+            if attempt < retries:
+                time.sleep(backoff_s)
+                backoff_s *= 2
+                continue
             return None
 
         except Exception as e:
