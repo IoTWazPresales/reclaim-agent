@@ -1,9 +1,12 @@
 """Main orchestration logic for the agent."""
 
+from __future__ import annotations
+
 import os
 import subprocess
 import tempfile
 import traceback
+import sys
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple
 from datetime import datetime
@@ -25,6 +28,7 @@ class Runner:
     # -------------------------
     # Debug / strict helpers
     # -------------------------
+
     def _env_flag(self, name: str) -> bool:
         return os.getenv(name, "").strip().lower() in ("1", "true", "yes", "y", "on")
 
@@ -34,67 +38,52 @@ class Runner:
     def _strict_enabled(self) -> bool:
         return self._env_flag("AGENT_STRICT")
 
-    def _print_debug(self, msg: str) -> None:
+    def _dbg(self, msg: str) -> None:
         if self._debug_enabled():
             print(msg)
-
-    def _run_cmd(
-        self,
-        cmd: List[str],
-        cwd: Optional[Path],
-        timeout: int = 300,
-        check: bool = False,
-        label: Optional[str] = None,
-    ) -> subprocess.CompletedProcess:
-        """
-        Run a subprocess command with consistent capture + debug output.
-        If check=True, raises RuntimeError on non-zero exit.
-        """
-        self._print_debug(f"[AGENT_DEBUG] Running: {' '.join(cmd)} (cwd={cwd})" + (f" [{label}]" if label else ""))
-
-        result = subprocess.run(
-            cmd,
-            cwd=str(cwd) if cwd else None,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
-
-        if self._debug_enabled():
-            if result.stdout:
-                print("[AGENT_DEBUG] STDOUT (first 1200 chars):")
-                print(result.stdout[:1200])
-            if result.stderr:
-                print("[AGENT_DEBUG] STDERR (first 1200 chars):")
-                print(result.stderr[:1200])
-
-        if check and result.returncode != 0:
-            raise RuntimeError(
-                f"Command failed ({label or 'subprocess'}): {' '.join(cmd)}\n"
-                f"returncode={result.returncode}\n"
-                f"stdout={(result.stdout or '')[:1200]}\n"
-                f"stderr={(result.stderr or '')[:1200]}"
-            )
-
-        return result
 
     def _fail(self, msg: str) -> None:
         """
         Centralized failure behavior.
-        In strict mode: raise (fails CI with non-zero exit).
-        Otherwise: just log and return.
+        - In strict mode: raise (fails CI with non-zero exit)
+        - Otherwise: just print and return
         """
         print(msg)
         if self._strict_enabled():
             raise RuntimeError(msg)
 
-    def _mark_blocked(self, milestone_id: str, reason: str) -> None:
-        update_milestone_status(self.config.milestones, milestone_id, "blocked", reason)
-        self.config.save()
+    def _run_cmd(
+        self,
+        cmd: List[str],
+        cwd: Path,
+        timeout: int = 300,
+        label: str = "",
+        capture: bool = True,
+    ) -> subprocess.CompletedProcess:
+        """
+        Wrapper around subprocess.run with consistent debug output.
+        """
+        self._dbg(f"[AGENT_DEBUG] Running: {' '.join(cmd)} (cwd={cwd}) {f'[{label}]' if label else ''}")
+        result = subprocess.run(
+            cmd,
+            cwd=str(cwd),
+            capture_output=capture,
+            text=True,
+            timeout=timeout,
+        )
+        if self._debug_enabled() and capture:
+            out = (result.stdout or "")[:1200]
+            err = (result.stderr or "")[:1200]
+            if out:
+                self._dbg("[AGENT_DEBUG] STDOUT (first 1200 chars):\n" + out)
+            if err:
+                self._dbg("[AGENT_DEBUG] STDERR (first 1200 chars):\n" + err)
+        return result
 
     # -------------------------
-    # Core operations
+    # Truth checks
     # -------------------------
+
     def run_truth_checks(self) -> List[Dict[str, Any]]:
         """Run truth checks and return failing checks."""
         if not self.repo_path:
@@ -102,68 +91,74 @@ class Runner:
 
         failing: List[Dict[str, Any]] = []
         app_path = self.repo_path / "app"
-
         if not app_path.exists():
             return []
 
         for check in self.config.truth_checks:
             cmd = check["command"].split()
             try:
-                result = subprocess.run(
-                    cmd,
-                    cwd=str(app_path),
-                    capture_output=True,
-                    text=True,
-                    timeout=300,
-                )
+                result = self._run_cmd(cmd, cwd=app_path, timeout=300, label=check["name"])
                 if result.returncode != 0:
-                    failing.append(
-                        {
-                            "name": check["name"],
-                            "command": check["command"],
-                            "error": (result.stderr or "")[:500],
-                            "output": (result.stdout or "")[:500],
-                        }
-                    )
+                    failing.append({
+                        "name": check["name"],
+                        "command": check["command"],
+                        "error": (result.stderr or "")[:1000],
+                        "output": (result.stdout or "")[:1000],
+                    })
             except subprocess.TimeoutExpired:
-                failing.append(
-                    {"name": check["name"], "command": check["command"], "error": "Command timed out", "output": ""}
-                )
+                failing.append({
+                    "name": check["name"],
+                    "command": check["command"],
+                    "error": "Command timed out",
+                    "output": "",
+                })
             except Exception as e:
-                failing.append(
-                    {"name": check["name"], "command": check["command"], "error": str(e), "output": ""}
-                )
+                failing.append({
+                    "name": check["name"],
+                    "command": check["command"],
+                    "error": str(e),
+                    "output": "",
+                })
 
         return failing
 
+    # -------------------------
+    # Patch application
+    # -------------------------
+
     def apply_patch(self, patch: str, base_path: Path) -> Tuple[bool, Optional[str]]:
         """Apply unified diff patch to repository."""
-        lines = patch.strip().split("\n")
+        if not patch or not patch.strip():
+            return False, "Empty patch"
+
+        # Extract diff start
+        lines = patch.strip("\n").split("\n")
         diff_start = None
         for i, line in enumerate(lines):
-            if line.startswith("---") or line.startswith("+++"):
+            if line.startswith("--- a/"):
                 diff_start = i
                 break
 
         if diff_start is None:
-            return False, "No diff found in patch"
+            return False, "No diff found in patch (missing '--- a/...')"
 
-        clean_patch = "\n".join(lines[diff_start:])
+        clean_patch = "\n".join(lines[diff_start:]).rstrip() + "\n"  # ensure newline at end
 
+        # Write patch to temp file
         with tempfile.NamedTemporaryFile(mode="w", suffix=".patch", delete=False) as f:
             f.write(clean_patch)
             patch_path = f.name
 
         try:
             # Check patch
-            result = self._run_cmd(["git", "apply", "--check", patch_path], cwd=base_path, timeout=120, check=False, label="git apply --check")
+            result = self._run_cmd(["git", "apply", "--check", patch_path], cwd=base_path, timeout=120, label="git apply --check")
             if result.returncode != 0:
-                return False, f"Patch check failed: {(result.stderr or '').strip()}"
+                return False, f"Patch check failed: {result.stderr or result.stdout}"
 
             # Apply patch
-            result = self._run_cmd(["git", "apply", patch_path], cwd=base_path, timeout=120, check=False, label="git apply")
+            result = self._run_cmd(["git", "apply", patch_path], cwd=base_path, timeout=120, label="git apply")
             if result.returncode != 0:
-                return False, f"Patch apply failed: {(result.stderr or '').strip()}"
+                return False, f"Patch apply failed: {result.stderr or result.stdout}"
 
             return True, None
         finally:
@@ -172,9 +167,40 @@ class Runner:
             except Exception:
                 pass
 
+    def _looks_like_corrupt_patch_error(self, err: str) -> bool:
+        if not err:
+            return False
+        e = err.lower()
+        return (
+            "corrupt patch" in e
+            or "patch unexpectedly ends" in e
+            or "malformed patch" in e
+            or "error: corrupt patch" in e
+        )
+
+    def _regen_prompt_for_corrupt_patch(self, original_prompt: str, error: str) -> str:
+        """
+        Ask model to re-emit a complete patch.
+        Keep it short and strict. We provide the failure hint and hard requirements.
+        """
+        return (
+            original_prompt
+            + "\n\n"
+            + "IMPORTANT:\n"
+            + "The previous unified diff was TRUNCATED or CORRUPT and could not be applied by `git apply`.\n"
+            + f"git error was: {error[:300]}\n"
+            + "Re-output the COMPLETE unified diff patch again.\n"
+            + "Rules:\n"
+            + "- Output ONLY the unified diff.\n"
+            + "- Ensure ALL hunks are complete (no cut-off lines).\n"
+            + "- Ensure the patch ends cleanly with a newline.\n"
+            + "- Start with `--- a/...`.\n"
+        )
+
     # -------------------------
-    # Fix mode
+    # Modes
     # -------------------------
+
     def run_fix_mode(self) -> Optional[str]:
         """Run in fix mode - fix failing truth checks."""
         print("Running truth checks...")
@@ -199,6 +225,7 @@ class Runner:
         except Exception as e:
             print("Failed to generate patch (exception thrown during fix mode)")
             if self._debug_enabled():
+                print("=== OpenAI exception (fix mode) ===")
                 traceback.print_exc()
             self._fail(f"OpenAI exception in fix mode: {type(e).__name__}: {e}")
             return None
@@ -208,47 +235,48 @@ class Runner:
             self._fail("OpenAI returned empty patch in fix mode")
             return None
 
+        # Create branch
         branch_name = f"agent/{datetime.now().strftime('%Y%m%d')}-fix-truth-checks"
         self.github.create_branch(branch_name, self.config.default_branch)
 
-        # Checkout branch locally
-        self._run_cmd(["git", "checkout", "-b", branch_name], cwd=self.repo_path, timeout=120, check=True, label="git checkout -b")
+        # Checkout branch in repo
+        self._run_cmd(["git", "checkout", "-b", branch_name], cwd=self.repo_path, timeout=120, label="git checkout -b")
 
+        # Apply patch (try once more if corrupt)
         success, error = self.apply_patch(patch, self.repo_path)
+        if not success and error and self._looks_like_corrupt_patch_error(error):
+            print("Patch looked corrupt/truncated. Regenerating once...")
+            regen_prompt = self._regen_prompt_for_corrupt_patch(prompt, error)
+            patch2 = call_openai(regen_prompt, self.config.openai_api_key)
+            if patch2:
+                success, error = self.apply_patch(patch2, self.repo_path)
+
         if not success:
+            print(f"Failed to apply patch: {error}")
             self._fail(f"Patch apply failed in fix mode: {error}")
             return None
 
+        # Verify truth checks pass
         print("Verifying fixes...")
         still_failing = self.run_truth_checks()
         if still_failing:
+            print("Truth checks still failing after patch")
             self._fail("Truth checks still failing after fix patch")
             return None
 
-        # Commit + push
-        self._run_cmd(["git", "add", "-A"], cwd=self.repo_path, timeout=120, check=True, label="git add")
-        self._run_cmd(["git", "commit", "-m", "fix: resolve failing truth checks"], cwd=self.repo_path, timeout=120, check=True, label="git commit")
-        self._run_cmd(["git", "push", "-u", "origin", branch_name], cwd=self.repo_path, timeout=180, check=True, label="git push")
+        # Commit changes
+        self._run_cmd(["git", "add", "-A"], cwd=self.repo_path, timeout=120, label="git add")
+        self._run_cmd(["git", "commit", "-m", "fix: resolve failing truth checks"], cwd=self.repo_path, timeout=120, label="git commit")
+        self._run_cmd(["git", "push", "-u", "origin", branch_name], cwd=self.repo_path, timeout=180, label="git push")
 
-        check_outputs = "\n".join([f"- {check['name']}: ✅ PASS" for check in self.config.truth_checks])
-
-        pr_body = f"""## Summary
-Fixed failing truth checks in the repository.
-
-## Root Cause
-The following truth checks were failing:
-{chr(10).join([f"- {check['name']}: {check.get('error', 'Failed')}" for check in failing])}
-
-## Changes
-- Applied LLM-generated patch to resolve failures
-- All truth checks now passing
-
-## Verification
-{check_outputs}
-
-## Files Changed
-See diff for details.
-"""
+        # Create PR
+        pr_body = (
+            "## Summary\n"
+            "Fixed failing truth checks in the repository.\n\n"
+            "## Verification\n"
+            + "\n".join([f"- {c['name']}: ✅ PASS" for c in self.config.truth_checks])
+            + "\n"
+        )
 
         pr = self.github.create_pr(
             title="fix: resolve failing truth checks",
@@ -263,139 +291,142 @@ See diff for details.
 
         return None
 
-    # -------------------------
-    # Milestone mode
-    # -------------------------
     def run_milestone_mode(self) -> Optional[str]:
         """Run in milestone mode - complete next todo milestone."""
         milestone = get_next_todo_milestone(self.config.milestones)
+
         if not milestone:
             print("No todo milestones found")
             return None
 
         milestone_id = milestone["id"]
-        title = milestone.get("title", milestone_id)
-        print(f"Processing milestone: {title} ({milestone_id})")
+        print(f"Processing milestone: {milestone['title']} ({milestone_id})")
 
         # Mark in progress
         update_milestone_status(self.config.milestones, milestone_id, "in_progress")
         self.config.save()
 
+        prompt = build_milestone_prompt(
+            milestone,
+            self.config.repo_rules,
+            self.config.max_files,
+            self.config.max_lines,
+        )
+
+        print("Calling OpenAI API for milestone patch...")
         try:
-            prompt = build_milestone_prompt(
-                milestone,
-                self.config.repo_rules,
-                self.config.max_files,
-                self.config.max_lines,
-            )
+            patch = call_openai(prompt, self.config.openai_api_key)
+        except Exception as e:
+            msg = f"OpenAI exception in milestone mode: {type(e).__name__}: {e}"
+            print("Failed to generate patch (exception thrown in milestone mode)")
+            if self._debug_enabled():
+                print("=== OpenAI exception (milestone mode) ===")
+                traceback.print_exc()
+            update_milestone_status(self.config.milestones, milestone_id, "blocked", msg)
+            self.config.save()
+            self._fail(msg)
+            return None
 
-            print("Calling OpenAI API for milestone patch...")
-            patch = None
-            try:
-                patch = call_openai(prompt, self.config.openai_api_key)
-            except Exception as e:
-                if self._debug_enabled():
-                    print("=== OpenAI exception (milestone mode) ===")
-                    traceback.print_exc()
-                self._mark_blocked(milestone_id, f"OpenAI exception: {type(e).__name__}: {e}")
-                self._fail(f"OpenAI exception in milestone mode: {type(e).__name__}: {e}")
+        if not patch:
+            msg = "Failed to generate patch: empty response from call_openai"
+            print("Failed to generate patch (empty response in milestone mode)")
+            update_milestone_status(self.config.milestones, milestone_id, "blocked", msg)
+            self.config.save()
+            self._fail("OpenAI returned empty patch in milestone mode")
+            return None
+
+        # Create branch
+        branch_slug = milestone_id.replace("_", "-")
+        branch_name = f"agent/{datetime.now().strftime('%Y%m%d')}-{branch_slug}"
+        self.github.create_branch(branch_name, self.config.default_branch)
+
+        # Checkout branch
+        self._run_cmd(["git", "checkout", "-b", branch_name], cwd=self.repo_path, timeout=120, label="git checkout -b")
+
+        # Apply patch (try once more if corrupt)
+        success, error = self.apply_patch(patch, self.repo_path)
+        if not success and error and self._looks_like_corrupt_patch_error(error):
+            print("Patch looked corrupt/truncated. Regenerating once...")
+            regen_prompt = self._regen_prompt_for_corrupt_patch(prompt, error)
+            patch2 = call_openai(regen_prompt, self.config.openai_api_key)
+            if patch2:
+                success, error = self.apply_patch(patch2, self.repo_path)
+
+        if not success:
+            msg = f"Patch apply failed in milestone mode: {error}"
+            print(msg)
+            update_milestone_status(self.config.milestones, milestone_id, "blocked", msg)
+            self.config.save()
+            self._fail(msg)
+            return None
+
+        # Verify acceptance criteria
+        print("Verifying acceptance criteria...")
+        app_path = self.repo_path / "app"
+
+        for cmd in milestone.get("acceptance", []):
+            cmd_parts = cmd.split()
+            result = self._run_cmd(cmd_parts, cwd=app_path, timeout=300, label=f"acceptance: {cmd}")
+            if result.returncode != 0:
+                msg = f"Acceptance criteria not met (failed: {cmd})"
+                print(msg)
+                update_milestone_status(self.config.milestones, milestone_id, "blocked", msg)
+                self.config.save()
+                self._fail(msg)
                 return None
 
-            if not patch:
-                self._mark_blocked(milestone_id, "Failed to generate patch: empty response from call_openai")
-                self._fail("OpenAI returned empty patch in milestone mode")
-                return None
+        # Commit changes
+        self._run_cmd(["git", "add", "-A"], cwd=self.repo_path, timeout=120, label="git add")
+        self._run_cmd(["git", "commit", "-m", f"feat: {milestone['title']}"], cwd=self.repo_path, timeout=120, label="git commit")
+        self._run_cmd(["git", "push", "-u", "origin", branch_name], cwd=self.repo_path, timeout=180, label="git push")
 
-            # Create branch remote + local
-            branch_slug = milestone_id.replace("_", "-")
-            branch_name = f"agent/{datetime.now().strftime('%Y%m%d')}-{branch_slug}"
-            self.github.create_branch(branch_name, self.config.default_branch)
-
-            self._run_cmd(["git", "checkout", "-b", branch_name], cwd=self.repo_path, timeout=120, check=True, label="git checkout -b")
-
-            success, error = self.apply_patch(patch, self.repo_path)
-            if not success:
-                self._mark_blocked(milestone_id, f"Patch apply failed: {error}")
-                self._fail(f"Patch apply failed in milestone mode: {error}")
-                return None
-
-            # Verify acceptance
-            print("Verifying acceptance criteria...")
-            app_path = self.repo_path / "app"
-            for cmd in milestone.get("acceptance", []):
-                cmd_parts = cmd.split()
-                res = self._run_cmd(cmd_parts, cwd=app_path, timeout=600, check=False, label=f"acceptance: {cmd}")
-                if res.returncode != 0:
-                    self._mark_blocked(milestone_id, f"Acceptance failed: {cmd}")
-                    self._fail(f"Acceptance criteria not met: {cmd}")
-                    return None
-
-            # Commit + push
-            self._run_cmd(["git", "add", "-A"], cwd=self.repo_path, timeout=120, check=True, label="git add")
-            self._run_cmd(["git", "commit", "-m", f"feat: {title}"], cwd=self.repo_path, timeout=120, check=True, label="git commit")
-            self._run_cmd(["git", "push", "-u", "origin", branch_name], cwd=self.repo_path, timeout=180, check=True, label="git push")
-
-            acceptance_outputs = "\n".join([f"- `{cmd}`: ✅ PASS" for cmd in milestone.get("acceptance", [])])
-
-            pr_body = f"""## Summary
-Completed milestone: {title}
-
-## Changes
-- Applied LLM-generated patch to complete milestone
-- All acceptance criteria now passing
+        # Create PR
+        acceptance_outputs = "\n".join([f"- `{cmd}`: ✅ PASS" for cmd in milestone.get("acceptance", [])])
+        pr_body = f"""## Summary
+Completed milestone: {milestone['title']}
 
 ## Verification
 {acceptance_outputs}
-
-## Files Changed
-See diff for details.
 """
 
-            pr = self.github.create_pr(
-                title=f"feat: {title}",
-                body=pr_body,
-                head=branch_name,
-                base=self.config.default_branch,
-            )
+        pr = self.github.create_pr(
+            title=f"feat: {milestone['title']}",
+            body=pr_body,
+            head=branch_name,
+            base=self.config.default_branch,
+        )
 
-            if pr:
-                print(f"Created PR: {pr['html_url']}")
+        if pr:
+            print(f"Created PR: {pr['html_url']}")
+            update_milestone_status(self.config.milestones, milestone_id, "done")
+            self.config.save()
+            return pr["html_url"]
 
-                update_milestone_status(self.config.milestones, milestone_id, "done")
-                self.config.save()
-                return pr["html_url"]
-
-            # If PR creation failed for some reason, mark blocked so it isn't stuck.
-            self._mark_blocked(milestone_id, "PR creation failed (GitHub API returned no PR)")
-            self._fail("Failed to create PR for milestone")
-            return None
-
-        except Exception as e:
-            # Absolute safety net: never leave milestone in_progress on unexpected errors
-            if self._debug_enabled():
-                print("=== Unhandled exception in milestone mode ===")
-                traceback.print_exc()
-
-            # only overwrite to blocked if it's still in progress
-            self._mark_blocked(milestone_id, f"Unhandled exception: {type(e).__name__}: {e}")
-            self._fail(f"Unhandled exception in milestone mode: {type(e).__name__}: {e}")
-            return None
+        msg = "Failed to create PR (GitHub API returned no PR object)"
+        update_milestone_status(self.config.milestones, milestone_id, "blocked", msg)
+        self.config.save()
+        self._fail(msg)
+        return None
 
     # -------------------------
     # Main entry
     # -------------------------
+
     def run(self, mode: str = "auto") -> Optional[str]:
         """Run agent in specified mode."""
         if not self.repo_path or not self.repo_path.exists():
             print("Repository path not found")
             return None
 
-        # Ensure we're on default branch and up to date
-        try:
-            self._run_cmd(["git", "checkout", self.config.default_branch], cwd=self.repo_path, timeout=120, check=True, label="git checkout default")
-            self._run_cmd(["git", "pull"], cwd=self.repo_path, timeout=180, check=True, label="git pull")
-        except Exception as e:
-            self._fail(f"Git sync failed on default branch: {type(e).__name__}: {e}")
+        # Ensure we're on default branch and updated
+        res = self._run_cmd(["git", "checkout", self.config.default_branch], cwd=self.repo_path, timeout=120, label="git checkout default")
+        if res.returncode != 0:
+            self._fail(f"Failed to checkout default branch: {res.stderr or res.stdout}")
+            return None
+
+        res = self._run_cmd(["git", "pull"], cwd=self.repo_path, timeout=180, label="git pull")
+        if res.returncode != 0:
+            self._fail(f"Failed to pull default branch: {res.stderr or res.stdout}")
             return None
 
         if mode in ("fix", "auto"):
