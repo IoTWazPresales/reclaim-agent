@@ -1,90 +1,485 @@
-"""Daily summary generation for the agent."""
+"""Main orchestration logic for the agent."""
 
-from typing import Dict, Any, List, Optional
+import os
+import subprocess
+import tempfile
+import traceback
+import sys
+from pathlib import Path
+from typing import Dict, Any, Optional, List, Tuple
 from datetime import datetime
 
 from .config import Config
 from .github_api import GitHubAPI
-from .milestones import get_milestones_by_status
+from .prompts import build_fix_prompt, build_milestone_prompt, call_openai
+from .milestones import get_next_todo_milestone, update_milestone_status
 
 
-def generate_daily_summary(
-    config: Config,
-    github: GitHubAPI,
-    runs_attempted: int,
-    prs_created: List[str],
-    date: Optional[str] = None
-) -> None:
-    """Generate and post daily summary issue."""
-    if not date:
-        date = datetime.now().strftime("%Y-%m-%d")
-    
-    title = f"Agent Daily Summary ({date})"
-    
-    # Run truth checks for health status
-    from .runner import Runner
-    runner = Runner(config)
-    failing_checks = runner.run_truth_checks()
-    health = "🔴 RED" if failing_checks else "🟢 GREEN"
-    
-    # Get milestone statuses
-    todo_milestones = get_milestones_by_status(config.milestones, "todo")
-    in_progress_milestones = get_milestones_by_status(config.milestones, "in_progress")
-    done_milestones = get_milestones_by_status(config.milestones, "done")
-    blocked_milestones = get_milestones_by_status(config.milestones, "blocked")
-    
-    # Format PR links
-    pr_links = "\n".join([f"- {pr}" for pr in prs_created]) if prs_created else "- None"
-    
-    # Format milestones
-    def format_milestone_list(milestones: List[Dict[str, Any]]) -> str:
-        if not milestones:
-            return "  - None"
-        return "\n".join([f"  - [{m['id']}] {m['title']}" for m in milestones])
-    
-    blocked_details = ""
-    if blocked_milestones:
-        blocked_details = "\n\n**Blocked Items:**\n"
-        for m in blocked_milestones:
-            reason = m.get("reason", "Unknown reason")
-            blocked_details += f"- [{m['id']}] {m['title']}: {reason}\n"
-    
-    body = f"""## Agent Daily Summary ({date})
+class Runner:
+    """Main runner for agent operations."""
 
-### Overview
-- **Runs Attempted**: {runs_attempted}
-- **PRs Created**: {len(prs_created)}
-- **Repo Health**: {health}
+    def __init__(self, config: Config):
+        self.config = config
+        self.github = GitHubAPI(config.github_token, config.repo_name)
+        self.repo_path = Path(config.repo_path) if config.repo_path else None
 
-### Repository Health
-{f"❌ {len(failing_checks)} failing checks" if failing_checks else "✅ All truth checks passing"}
+    # -------------------------
+    # Debug / strict helpers
+    # -------------------------
+    def _env_flag(self, name: str) -> bool:
+        return os.getenv(name, "").strip().lower() in ("1", "true", "yes", "y", "on")
 
-### Pull Requests Created
-{pr_links}
+    def _debug_enabled(self) -> bool:
+        return self._env_flag("AGENT_DEBUG")
 
-### Milestone Status
+    def _strict_enabled(self) -> bool:
+        return self._env_flag("AGENT_STRICT")
 
-**Todo**: {len(todo_milestones)}
-{format_milestone_list(todo_milestones)}
+    def _handle_patch_failure(self, msg: str) -> None:
+        """
+        Centralized failure behavior for patch generation.
+        - In strict mode: raise (fails CI with non-zero exit)
+        - Otherwise: just log and return
+        """
+        print(msg)
+        if self._strict_enabled():
+            raise RuntimeError(msg)
 
-**In Progress**: {len(in_progress_milestones)}
-{format_milestone_list(in_progress_milestones)}
+    def run_truth_checks(self) -> List[Dict[str, Any]]:
+        """Run truth checks and return failing checks."""
+        if not self.repo_path:
+            return []
 
-**Done**: {len(done_milestones)}
-{format_milestone_list(done_milestones)}
+        failing = []
+        app_path = self.repo_path / "app"
 
-**Blocked**: {len(blocked_milestones)}
-{format_milestone_list(blocked_milestones)}
-{blocked_details}
+        if not app_path.exists():
+            return []
 
----
-*Generated automatically by Reclaim Agent*
+        for check in self.config.truth_checks:
+            cmd = check["command"].split()
+            try:
+                result = subprocess.run(
+                    cmd,
+                    cwd=str(app_path),
+                    capture_output=True,
+                    text=True,
+                    timeout=300
+                )
+                if result.returncode != 0:
+                    failing.append({
+                        "name": check["name"],
+                        "command": check["command"],
+                        "error": result.stderr[:500],
+                        "output": result.stdout[:500]
+                    })
+            except subprocess.TimeoutExpired:
+                failing.append({
+                    "name": check["name"],
+                    "command": check["command"],
+                    "error": "Command timed out",
+                    "output": ""
+                })
+            except Exception as e:
+                failing.append({
+                    "name": check["name"],
+                    "command": check["command"],
+                    "error": str(e),
+                    "output": ""
+                })
+
+        return failing
+
+    def apply_patch(self, patch: str, base_path: Path) -> Tuple[bool, Optional[str]]:
+        """Apply unified diff patch to repository."""
+        # Clean patch - remove markdown fences and extract diff
+        lines = patch.strip().split("\n")
+        diff_start = None
+        for i, line in enumerate(lines):
+            if line.startswith("---") or line.startswith("+++"):
+                diff_start = i
+                break
+
+        if diff_start is None:
+            return False, "No diff found in patch"
+
+        clean_patch = "\n".join(lines[diff_start:])
+
+        # Write patch to temp file
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.patch', delete=False) as f:
+            f.write(clean_patch)
+            patch_path = f.name
+
+        try:
+            # Apply patch with git apply
+            result = subprocess.run(
+                ["git", "apply", "--check", patch_path],
+                cwd=str(base_path),
+                capture_output=True,
+                text=True
+            )
+
+            if result.returncode != 0:
+                return False, f"Patch check failed: {result.stderr}"
+
+            # Apply patch
+            result = subprocess.run(
+                ["git", "apply", patch_path],
+                cwd=str(base_path),
+                capture_output=True,
+                text=True
+            )
+
+            if result.returncode != 0:
+                return False, f"Patch apply failed: {result.stderr}"
+
+            return True, None
+        finally:
+            os.unlink(patch_path)
+
+    def run_fix_mode(self) -> Optional[str]:
+        """Run in fix mode - fix failing truth checks."""
+        print("Running truth checks...")
+        failing = self.run_truth_checks()
+
+        if not failing:
+            print("All truth checks passing - no fix needed")
+            return None
+
+        print(f"Found {len(failing)} failing checks")
+
+        # Generate patch using LLM
+        prompt = build_fix_prompt(
+            failing,
+            self.config.repo_rules,
+            self.config.max_files,
+            self.config.max_lines
+        )
+
+        print("Calling OpenAI API for fix patch...")
+        try:
+            patch = call_openai(prompt, self.config.openai_api_key)
+        except Exception as e:
+            print("Failed to generate patch (exception thrown during fix mode)")
+            if self._debug_enabled():
+                print("=== OpenAI exception (fix mode) ===")
+                traceback.print_exc()
+            self._handle_patch_failure(f"OpenAI exception in fix mode: {type(e).__name__}: {e}")
+            return None
+
+        if not patch:
+            print("Failed to generate patch (empty response in fix mode)")
+            self._handle_patch_failure("OpenAI returned empty patch in fix mode")
+            return None
+
+        # Create branch
+        branch_name = f"agent/{datetime.now().strftime('%Y%m%d')}-fix-truth-checks"
+        self.github.create_branch(branch_name, self.config.default_branch)
+
+        # Checkout branch in repo
+        subprocess.run(
+            ["git", "checkout", "-b", branch_name],
+            cwd=str(self.repo_path),
+            capture_output=True
+        )
+
+        # Apply patch
+        success, error = self.apply_patch(patch, self.repo_path)
+
+        if not success:
+            print(f"Failed to apply patch: {error}")
+            if self._strict_enabled():
+                raise RuntimeError(f"Patch apply failed in fix mode: {error}")
+            return None
+
+        # Verify truth checks pass
+        print("Verifying fixes...")
+        still_failing = self.run_truth_checks()
+
+        if still_failing:
+            print("Truth checks still failing after patch")
+            if self._strict_enabled():
+                raise RuntimeError("Truth checks still failing after fix patch")
+            return None
+
+        # Commit changes
+        subprocess.run(
+            ["git", "add", "-A"],
+            cwd=str(self.repo_path),
+            capture_output=True
+        )
+
+        subprocess.run(
+            ["git", "commit", "-m", "fix: resolve failing truth checks"],
+            cwd=str(self.repo_path),
+            capture_output=True
+        )
+
+        # Push branch
+        subprocess.run(
+            ["git", "push", "-u", "origin", branch_name],
+            cwd=str(self.repo_path),
+            capture_output=True
+        )
+
+        # Create PR
+        check_outputs = "\n".join([
+            f"- {check['name']}: ✅ PASS"
+            for check in self.config.truth_checks
+        ])
+
+        pr_body = f"""## Summary
+Fixed failing truth checks in the repository.
+
+## Root Cause
+The following truth checks were failing:
+{chr(10).join([f"- {check['name']}: {check.get('error', 'Failed')}" for check in failing])}
+
+## Changes
+- Applied LLM-generated patch to resolve failures
+- All truth checks now passing
+
+## Verification
+{check_outputs}
+
+## Files Changed
+See diff for details.
 """
-    
-    # Create or update issue
-    issue = github.create_or_update_issue(title, body)
-    
-    if issue:
-        print(f"Daily summary created/updated: {issue['html_url']}")
-    else:
-        print("Failed to create/update daily summary")
+
+        pr = self.github.create_pr(
+            title="fix: resolve failing truth checks",
+            body=pr_body,
+            head=branch_name,
+            base=self.config.default_branch
+        )
+
+        if pr:
+            print(f"Created PR: {pr['html_url']}")
+            return pr['html_url']
+
+        return None
+
+    def run_milestone_mode(self) -> Optional[str]:
+        """Run in milestone mode - complete next todo milestone."""
+        milestone = get_next_todo_milestone(self.config.milestones)
+
+        if not milestone:
+            print("No todo milestones found")
+            return None
+
+        milestone_id = milestone["id"]
+        print(f"Processing milestone: {milestone['title']} ({milestone_id})")
+
+        # Mark in progress
+        update_milestone_status(
+            self.config.milestones,
+            milestone_id,
+            "in_progress"
+        )
+        self.config.save()
+
+        # Generate patch using LLM
+        prompt = build_milestone_prompt(
+            milestone,
+            self.config.repo_rules,
+            self.config.max_files,
+            self.config.max_lines
+        )
+
+        print("Calling OpenAI API for milestone patch...")
+        try:
+            patch = call_openai(prompt, self.config.openai_api_key)
+        except Exception as e:
+            print("Failed to generate patch (exception thrown in milestone mode)")
+            if self._debug_enabled():
+                print("=== OpenAI exception (milestone mode) ===")
+                traceback.print_exc()
+
+            update_milestone_status(
+                self.config.milestones,
+                milestone_id,
+                "blocked",
+                f"OpenAI exception: {type(e).__name__}: {e}"
+            )
+            self.config.save()
+            self._handle_patch_failure(f"OpenAI exception in milestone mode: {type(e).__name__}: {e}")
+            return None
+
+        if not patch:
+            print("Failed to generate patch (empty response in milestone mode)")
+            update_milestone_status(
+                self.config.milestones,
+                milestone_id,
+                "blocked",
+                "Failed to generate patch: empty response from call_openai"
+            )
+            self.config.save()
+            self._handle_patch_failure("OpenAI returned empty patch in milestone mode")
+            return None
+
+        # Create branch
+        branch_slug = milestone_id.replace("_", "-")
+        branch_name = f"agent/{datetime.now().strftime('%Y%m%d')}-{branch_slug}"
+        self.github.create_branch(branch_name, self.config.default_branch)
+
+        # Checkout branch in repo
+        subprocess.run(
+            ["git", "checkout", "-b", branch_name],
+            cwd=str(self.repo_path),
+            capture_output=True
+        )
+
+        # Apply patch
+        success, error = self.apply_patch(patch, self.repo_path)
+
+        if not success:
+            print(f"Failed to apply patch: {error}")
+            update_milestone_status(
+                self.config.milestones,
+                milestone_id,
+                "blocked",
+                f"Patch apply failed: {error}"
+            )
+            self.config.save()
+            if self._strict_enabled():
+                raise RuntimeError(f"Patch apply failed in milestone mode: {error}")
+            return None
+
+        # Verify acceptance criteria
+        print("Verifying acceptance criteria...")
+        all_passed = True
+        app_path = self.repo_path / "app"
+
+        for cmd in milestone.get("acceptance", []):
+            cmd_parts = cmd.split()
+            result = subprocess.run(
+                cmd_parts,
+                cwd=str(app_path),
+                capture_output=True,
+                text=True,
+                timeout=300
+            )
+            if result.returncode != 0:
+                all_passed = False
+                if self._debug_enabled():
+                    print(f"Acceptance command failed: {cmd}")
+                    print("STDOUT (first 500):")
+                    print((result.stdout or "")[:500])
+                    print("STDERR (first 500):")
+                    print((result.stderr or "")[:500])
+                break
+
+        if not all_passed:
+            print("Acceptance criteria not met")
+            update_milestone_status(
+                self.config.milestones,
+                milestone_id,
+                "blocked",
+                "Acceptance criteria not met"
+            )
+            self.config.save()
+            if self._strict_enabled():
+                raise RuntimeError("Acceptance criteria not met in milestone mode")
+            return None
+
+        # Commit changes
+        subprocess.run(
+            ["git", "add", "-A"],
+            cwd=str(self.repo_path),
+            capture_output=True
+        )
+
+        subprocess.run(
+            ["git", "commit", "-m", f"feat: {milestone['title']}"],
+            cwd=str(self.repo_path),
+            capture_output=True
+        )
+
+        # Push branch
+        subprocess.run(
+            ["git", "push", "-u", "origin", branch_name],
+            cwd=str(self.repo_path),
+            capture_output=True
+        )
+
+        # Create PR
+        acceptance_outputs = "\n".join([
+            f"- `{cmd}`: ✅ PASS"
+            for cmd in milestone.get("acceptance", [])
+        ])
+
+        pr_body = f"""## Summary
+Completed milestone: {milestone['title']}
+
+## Root Cause
+Milestone task: {milestone.get('type', 'feature')} - {milestone['title']}
+
+## Changes
+- Applied LLM-generated patch to complete milestone
+- All acceptance criteria now passing
+
+## Verification
+{acceptance_outputs}
+
+## Files Changed
+See diff for details.
+"""
+
+        pr = self.github.create_pr(
+            title=f"feat: {milestone['title']}",
+            body=pr_body,
+            head=branch_name,
+            base=self.config.default_branch
+        )
+
+        if pr:
+            print(f"Created PR: {pr['html_url']}")
+
+            # Mark milestone as done
+            update_milestone_status(
+                self.config.milestones,
+                milestone_id,
+                "done"
+            )
+            self.config.save()
+
+            return pr['html_url']
+
+        return None
+
+    def run(self, mode: str = "auto") -> Optional[str]:
+        """Run agent in specified mode."""
+        if not self.repo_path or not self.repo_path.exists():
+            print("Repository path not found")
+            return None
+
+        # Ensure we're on default branch
+        subprocess.run(
+            ["git", "checkout", self.config.default_branch],
+            cwd=str(self.repo_path),
+            capture_output=True
+        )
+        subprocess.run(
+            ["git", "pull"],
+            cwd=str(self.repo_path),
+            capture_output=True
+        )
+
+        if mode == "fix" or mode == "auto":
+            # Check if fixes needed
+            failing = self.run_truth_checks()
+            if failing:
+                return self.run_fix_mode()
+
+        if mode == "milestone" or mode == "auto":
+            # Check for milestones
+            milestone = get_next_todo_milestone(self.config.milestones)
+            if milestone:
+                result = self.run_milestone_mode()
+                if result and milestone.get("stop_feature"):
+                    print("Stop feature enabled - stopping after milestone")
+                    return result
+                return result
+
+        print("No work needed - repo is green and no milestones")
+        return None
