@@ -1,10 +1,10 @@
 """Prompt templates for LLM interactions.
 
-This module builds prompts for fix/milestone modes and calls the OpenAI API.
-It is intentionally defensive:
-- Supports multiple OpenAI response payload shapes (Responses API + legacy chat).
-- Avoids unsupported params for certain models (e.g., temperature for some codex-style models).
-- Adds rich debug output when AGENT_DEBUG=1, without leaking secrets.
+Defensive OpenAI caller:
+- Uses Responses API (v1/responses).
+- Extracts text from multiple payload shapes (including payload["text"]).
+- Retries automatically when the response is incomplete due to max_output_tokens.
+- Avoids sending unsupported parameters unless explicitly configured.
 """
 
 from __future__ import annotations
@@ -20,7 +20,6 @@ def build_fix_prompt(
     max_files: int,
     max_lines: int
 ) -> str:
-    """Build prompt for fix mode."""
     check_details = "\n".join([
         f"- {check['name']}: {check.get('error', 'Failed')}"
         for check in failing_checks
@@ -66,8 +65,8 @@ def build_milestone_prompt(
     max_lines: int,
     current_files: Optional[str] = None
 ) -> str:
-    """Build prompt for milestone mode."""
     acceptance = "\n".join([f"- {cmd}" for cmd in milestone.get("acceptance", [])])
+
     target_files = milestone.get("target_files", [])
     files_context = ""
     if target_files:
@@ -81,8 +80,6 @@ def build_milestone_prompt(
 
     rules_text = "\n".join([f"- {rule}" for rule in repo_rules])
 
-    # NOTE: The agent's runner applies git patches. To reduce "empty patch" / wrong-format issues,
-    # we keep the instruction extremely explicit and repeat "unified diff only".
     return f"""You are a code modification agent for the Reclaim repository. Complete the milestone task below.
 
 REPO RULES (CRITICAL - MUST FOLLOW):
@@ -130,20 +127,44 @@ def _safe_trunc(s: str, n: int) -> str:
 
 def _extract_text_from_responses_api(payload: dict) -> str:
     """
-    Extracts the primary text output from OpenAI Responses API JSON.
-    Supports common response shapes across model families.
+    Extract primary text from Responses API payload.
 
-    Known shapes:
-    1) {"output_text": "..."}  (convenience)
-    2) {"output":[{"type":"message","content":[{"type":"output_text","text":"..."}]}]}
-    3) {"output":[{"type":"message","content":[{"type":"text","text":"..."}]}]}
-    4) {"output":[{"type":"output_text","text":"..."}]}  (direct chunks)
+    We support:
+    - payload["output_text"] (convenience)
+    - payload["text"]["value"] / payload["text"]["content"] (common streaming container)
+    - payload["output"][...]["content"][...]["text"] (message content blocks)
+    - payload["output"][...]["text"] (direct text chunks)
     """
-    # Convenience field (some SDKs / responses)
+    # 1) Convenience field
     ot = payload.get("output_text")
     if isinstance(ot, str) and ot.strip():
         return ot.strip()
 
+    # 2) Common top-level text container (your log shows "text": {"format": ...})
+    t = payload.get("text")
+    if isinstance(t, dict):
+        # Some variants use "value"
+        v = t.get("value")
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+        # Others use "content"
+        c = t.get("content")
+        if isinstance(c, str) and c.strip():
+            return c.strip()
+        # Some use a nested array
+        arr = t.get("chunks") or t.get("parts")
+        if isinstance(arr, list):
+            chunks = []
+            for item in arr:
+                if isinstance(item, str) and item.strip():
+                    chunks.append(item.strip())
+                elif isinstance(item, dict) and isinstance(item.get("text"), str) and item["text"].strip():
+                    chunks.append(item["text"].strip())
+            joined = "\n".join(chunks).strip()
+            if joined:
+                return joined
+
+    # 3) output list parsing
     output = payload.get("output")
     if isinstance(output, list):
         chunks: List[str] = []
@@ -151,65 +172,37 @@ def _extract_text_from_responses_api(payload: dict) -> str:
             if not isinstance(item, dict):
                 continue
 
-            # Direct output chunk
+            # Direct chunk
             if item.get("type") in ("output_text", "text") and isinstance(item.get("text"), str):
-                t = item["text"].strip()
-                if t:
-                    chunks.append(t)
+                txt = item["text"].strip()
+                if txt:
+                    chunks.append(txt)
                 continue
 
-            # Message-style
+            # Message content array
             content = item.get("content")
             if isinstance(content, list):
-                for c in content:
-                    if not isinstance(c, dict):
+                for part in content:
+                    if not isinstance(part, dict):
                         continue
-                    # Some payloads use type=text; some use output_text
-                    if c.get("type") in ("output_text", "text") and isinstance(c.get("text"), str):
-                        t = c["text"].strip()
-                        if t:
-                            chunks.append(t)
+                    if part.get("type") in ("output_text", "text") and isinstance(part.get("text"), str):
+                        txt = part["text"].strip()
+                        if txt:
+                            chunks.append(txt)
 
-        text = "\n".join(chunks).strip()
-        if text:
-            return text
+        joined = "\n".join(chunks).strip()
+        if joined:
+            return joined
 
-    return ""
-
-
-def _extract_text_from_chat_completions(payload: dict) -> str:
-    """
-    Extract text from legacy chat.completions format, if we ever fall back.
-    Shape:
-      {"choices":[{"message":{"content":"..."}}]}
-    """
-    try:
-        choices = payload.get("choices")
-        if isinstance(choices, list) and choices:
-            msg = choices[0].get("message", {})
-            content = msg.get("content")
-            if isinstance(content, str):
-                return content.strip()
-    except Exception:
-        pass
     return ""
 
 
 def call_openai(prompt: str, api_key: str) -> Optional[str]:
     """
-    Call OpenAI API with prompt and return response content (expected unified diff).
+    Call OpenAI Responses API and return unified diff text.
 
-    Default: Responses API (v1/responses).
-    Optional fallback: legacy Chat Completions (v1/chat/completions) if explicitly enabled.
-
-    Env vars:
-      OPENAI_MODEL: model name override (default: gpt-4.1)
-      OPENAI_TEMPERATURE: optional float; only sent when provided and parseable
-      AGENT_DEBUG: 1 to print detailed logs
-      OPENAI_ENDPOINT: override base endpoint (default: https://api.openai.com)
-      OPENAI_USE_CHAT_COMPLETIONS_FALLBACK: 1 to allow fallback when Responses returns 200 but empty extract
-      OPENAI_TIMEOUT_S: request timeout seconds (default: 90)
-      OPENAI_MAX_OUTPUT_TOKENS: override max_output_tokens (default: 4000)
+    Key reliability feature:
+    - If response.status == "incomplete" due to "max_output_tokens", retry once with higher token budget.
     """
     import requests
 
@@ -219,111 +212,116 @@ def call_openai(prompt: str, api_key: str) -> Optional[str]:
     base = os.getenv("OPENAI_ENDPOINT", "").strip() or "https://api.openai.com"
     url = f"{base}/v1/responses"
 
+    # Timeouts
     timeout_s = 90
-    try:
-        t = os.getenv("OPENAI_TIMEOUT_S", "").strip()
-        if t:
+    t = os.getenv("OPENAI_TIMEOUT_S", "").strip()
+    if t:
+        try:
             timeout_s = int(t)
-    except Exception:
-        timeout_s = 90
+        except Exception:
+            timeout_s = 90
 
+    # Initial output token budget
     max_out = 4000
-    try:
-        mo = os.getenv("OPENAI_MAX_OUTPUT_TOKENS", "").strip()
-        if mo:
+    mo = os.getenv("OPENAI_MAX_OUTPUT_TOKENS", "").strip()
+    if mo:
+        try:
             max_out = int(mo)
-    except Exception:
-        max_out = 4000
+        except Exception:
+            max_out = 4000
 
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
 
-    # Responses API format
-    data: Dict[str, Any] = {
-        "model": model,
-        "input": [
-            {"role": "system", "content": "You are a code modification agent that outputs only unified diff patches."},
-            {"role": "user", "content": prompt},
-        ],
-        "max_output_tokens": max_out,
-    }
+    # Base request payload builder
+    def make_data(max_output_tokens: int) -> Dict[str, Any]:
+        data: Dict[str, Any] = {
+            "model": model,
+            "input": [
+                {"role": "system", "content": "You are a code modification agent that outputs only unified diff patches."},
+                {"role": "user", "content": prompt},
+            ],
+            "max_output_tokens": max_output_tokens,
+        }
 
-    # Only include temperature if explicitly set (some models reject it)
-    temp = os.getenv("OPENAI_TEMPERATURE", "").strip()
-    if temp:
-        try:
-            data["temperature"] = float(temp)
-        except ValueError:
-            pass
+        # Only include temperature if explicitly set (some models reject it)
+        temp = os.getenv("OPENAI_TEMPERATURE", "").strip()
+        if temp:
+            try:
+                data["temperature"] = float(temp)
+            except ValueError:
+                pass
+
+        # If you want to try to reduce reasoning overhead, uncomment this.
+        # Some model families honor it; others ignore it.
+        # data["reasoning"] = {"effort": "low"}
+
+        return data
 
     retries = 3
     backoff_s = 2
 
+    # We will allow ONE “incomplete due to tokens” retry with a bigger budget
+    # (within a safe cap so you don’t explode costs).
+    bumped_once = False
+    bump_cap = int(os.getenv("OPENAI_MAX_OUTPUT_TOKENS_CAP", "").strip() or "20000")
+
     for attempt in range(1, retries + 1):
         try:
+            data = make_data(max_out)
+
             if debug:
-                print(f"[AGENT_DEBUG] OpenAI request: endpoint=v1/responses model={model} attempt={attempt}/{retries}")
+                print(f"[AGENT_DEBUG] OpenAI request: endpoint=v1/responses model={model} attempt={attempt}/{retries} max_output_tokens={max_out}")
 
             response = requests.post(url, headers=headers, json=data, timeout=timeout_s)
-            status = response.status_code
+            status_code = response.status_code
 
-            if status == 200:
-                raw_text = response.text  # for debug if extraction fails
+            if status_code == 200:
+                raw = response.text
                 payload = response.json()
-                content = _extract_text_from_responses_api(payload)
+
+                extracted = _extract_text_from_responses_api(payload)
 
                 if debug:
-                    preview = _safe_trunc(content.replace("\n", "\\n"), 400) if content else ""
+                    preview = _safe_trunc(extracted.replace("\n", "\\n"), 400) if extracted else ""
                     print(f"[AGENT_DEBUG] OpenAI content preview (first 400 chars): {preview}")
-                    if not content:
-                        # This is the key debug you were missing: show the actual shape.
-                        print(f"[AGENT_DEBUG] OpenAI raw response (first 2000 chars): {_safe_trunc(raw_text, 2000)}")
+                    if not extracted:
+                        print(f"[AGENT_DEBUG] OpenAI raw response (first 2000 chars): {_safe_trunc(raw, 2000)}")
 
-                if content and content.strip():
-                    return content.strip()
+                # If we got text, return it
+                if extracted and extracted.strip():
+                    return extracted.strip()
 
-                # Optional fallback (disabled by default) to chat.completions if enabled
-                if _env_flag("OPENAI_USE_CHAT_COMPLETIONS_FALLBACK"):
+                # If incomplete due to max_output_tokens, bump and retry once immediately.
+                resp_status = payload.get("status")
+                inc = payload.get("incomplete_details") or {}
+                reason = inc.get("reason")
+
+                if (resp_status == "incomplete" and reason == "max_output_tokens" and not bumped_once):
+                    bumped_once = True
+                    # Heuristic: 4000 -> 12000 (or x3), capped
+                    new_budget = min(max_out * 3, bump_cap)
                     if debug:
-                        print("[AGENT_DEBUG] Empty extract from responses; attempting chat.completions fallback")
-
-                    chat_url = f"{base}/v1/chat/completions"
-                    chat_data: Dict[str, Any] = {
-                        "model": model,
-                        "messages": [
-                            {"role": "system", "content": "You are a code modification agent that outputs only unified diff patches."},
-                            {"role": "user", "content": prompt},
-                        ],
-                        "max_tokens": max_out,
-                    }
-                    # Only include temperature if explicitly set
-                    if "temperature" in data:
-                        chat_data["temperature"] = data["temperature"]
-
-                    chat_resp = requests.post(chat_url, headers=headers, json=chat_data, timeout=timeout_s)
-                    if chat_resp.status_code == 200:
-                        chat_payload = chat_resp.json()
-                        chat_text = _extract_text_from_chat_completions(chat_payload)
-                        if debug:
-                            chat_preview = _safe_trunc(chat_text.replace("\n", "\\n"), 400) if chat_text else ""
-                            print(f"[AGENT_DEBUG] Chat fallback preview (first 400 chars): {chat_preview}")
-                        return chat_text.strip() if chat_text and chat_text.strip() else None
+                        print(f"[AGENT_DEBUG] Response incomplete due to max_output_tokens. Bumping max_output_tokens {max_out} -> {new_budget} and retrying once.")
+                    max_out = new_budget
+                    # Don’t consume the attempt; just continue loop (same attempt count OK).
+                    continue
 
                 return None
 
-            # Non-200: log useful error
+            # Non-200
             err_json = None
             if debug:
-                print(f"[AGENT_DEBUG] OpenAI non-200 status={status}")
+                print(f"[AGENT_DEBUG] OpenAI non-200 status={status_code}")
                 try:
                     err_json = response.json()
                     print(f"[AGENT_DEBUG] OpenAI error JSON: {err_json}")
                 except Exception:
                     print(f"[AGENT_DEBUG] OpenAI error text: {_safe_trunc(response.text, 2000)}")
 
-            # Try parse error JSON if not already
+            # Parse error code
             if err_json is None:
                 try:
                     err_json = response.json()
@@ -335,13 +333,12 @@ def call_openai(prompt: str, api_key: str) -> Optional[str]:
                 err = err_json.get("error") or {}
                 err_code = err.get("code") or err.get("type")
 
-            # Quota: retries are pointless
             if err_code == "insufficient_quota":
                 print("OpenAI quota exhausted / billing not active for this API key (insufficient_quota).")
                 return None
 
-            # Retry on transient errors
-            if status in (429, 500, 502, 503, 504) and attempt < retries:
+            # Retry transient
+            if status_code in (429, 500, 502, 503, 504) and attempt < retries:
                 time.sleep(backoff_s)
                 backoff_s *= 2
                 continue
