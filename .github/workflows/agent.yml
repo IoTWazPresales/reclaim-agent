@@ -43,5 +43,6 @@ jobs:
           AGENT_DEBUG: "1"
           AGENT_STRICT: "1"
           PYTHONUNBUFFERED: "1"
+          OPENAI_MODEL: gpt-5.2-codex
         run: |
           python -m agent.run
