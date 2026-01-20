@@ -32,12 +32,17 @@ jobs:
           path: reclaim-repo
           ref: ${{ vars.RECLAIM_DEFAULT_BRANCH }}
 
-      - name: Run agent
+       - name: Run agent
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           RECLAIM_GH_TOKEN: ${{ secrets.RECLAIM_GH_TOKEN }}
           RECLAIM_REPO: ${{ vars.RECLAIM_REPO }}
           RECLAIM_DEFAULT_BRANCH: ${{ vars.RECLAIM_DEFAULT_BRANCH }}
           RECLAIM_REPO_PATH: ${{ github.workspace }}/reclaim-repo
+
+          # Debug / reliability
+          LOG_LEVEL: DEBUG
+          AGENT_DEBUG: "1"
+          PYTHONUNBUFFERED: "1"
         run: |
           python -m agent.run
