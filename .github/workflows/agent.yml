@@ -44,5 +44,22 @@ jobs:
           AGENT_STRICT: "1"
           PYTHONUNBUFFERED: "1"
           OPENAI_MODEL: gpt-5.2-codex
+- name: Run agent
+  env:
+    OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+    RECLAIM_GH_TOKEN: ${{ secrets.RECLAIM_GH_TOKEN }}
+    RECLAIM_REPO: ${{ vars.RECLAIM_REPO }}
+    RECLAIM_DEFAULT_BRANCH: ${{ vars.RECLAIM_DEFAULT_BRANCH }}
+    RECLAIM_REPO_PATH: ${{ github.workspace }}/reclaim-repo
+
+    LOG_LEVEL: DEBUG
+    AGENT_DEBUG: "1"
+    PYTHONUNBUFFERED: "1"
+    OPENAI_MODEL: gpt-5.2-codex
+    OPENAI_READ_TIMEOUT_S: "300"
+    OPENAI_MAX_OUTPUT_TOKENS: "8000"
+    OPENAI_MAX_OUTPUT_TOKENS_CAP: "20000"
+  run: |
+    python -m agent.run
         run: |
           python -m agent.run
