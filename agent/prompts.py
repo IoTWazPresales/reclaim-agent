@@ -111,65 +111,87 @@ def _env_flag(name: str) -> bool:
     return os.getenv(name, "").strip().lower() in ("1", "true", "yes", "y", "on")
 
 
+def _extract_text_from_responses_api(payload: dict) -> str:
+    """
+    Extracts the primary text output from OpenAI Responses API JSON.
+    Supports common response shapes.
+    """
+    # Preferred: output_text convenience field (some SDKs provide; API often does not)
+    if isinstance(payload.get("output_text"), str) and payload["output_text"].strip():
+        return payload["output_text"].strip()
+
+    output = payload.get("output")
+    if isinstance(output, list):
+        chunks: list[str] = []
+        for item in output:
+            # item can have "content": [{ "type": "output_text", "text": "..."}, ...]
+            content = item.get("content")
+            if isinstance(content, list):
+                for c in content:
+                    if c.get("type") in ("output_text", "text") and isinstance(c.get("text"), str):
+                        chunks.append(c["text"])
+        text = "\n".join(chunks).strip()
+        if text:
+            return text
+
+    # Fallback: some variants return { "choices": ... } or other formats
+    # but we keep it conservative: stringify if nothing else.
+    return ""
+
+
 def call_openai(prompt: str, api_key: str) -> Optional[str]:
-    """Call OpenAI API with prompt and return response content (unified diff)."""
+    """
+    Call OpenAI API with prompt and return response content (unified diff).
+
+    Uses the Responses API (v1/responses) which supports GPT-5.x / Codex-style models.
+    """
     import requests
 
     debug = _env_flag("AGENT_DEBUG")
 
-    # Prefer env override so you can change without code edits.
-    # Safe default for broad availability on Chat Completions:
-    model = os.getenv("OPENAI_MODEL", "").strip() or "gpt-4o-mini"
+    # Allow override via workflow env var
+    model = os.getenv("OPENAI_MODEL", "").strip() or "gpt-4.1"
 
-    url = "https://api.openai.com/v1/chat/completions"
+    url = "https://api.openai.com/v1/responses"
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
 
+    # Responses API format
     data = {
         "model": model,
-        "messages": [
+        "input": [
             {"role": "system", "content": "You are a code modification agent that outputs only unified diff patches."},
             {"role": "user", "content": prompt},
         ],
         "temperature": 0.1,
-        "max_tokens": 4000,
+        "max_output_tokens": 4000,
     }
 
-    # Small retry for transient failures (rate limit / 5xx)
     retries = 3
     backoff_s = 2
 
     for attempt in range(1, retries + 1):
         try:
             if debug:
-                print(f"[AGENT_DEBUG] OpenAI request: model={model} attempt={attempt}/{retries}")
+                print(f"[AGENT_DEBUG] OpenAI request: endpoint=v1/responses model={model} attempt={attempt}/{retries}")
 
-            response = requests.post(url, headers=headers, json=data, timeout=60)
+            response = requests.post(url, headers=headers, json=data, timeout=90)
             status = response.status_code
 
-            # Success path
             if status == 200:
-                result = response.json()
-                # Defensive extraction
-                choices = result.get("choices") or []
-                if not choices:
-                    if debug:
-                        print("[AGENT_DEBUG] OpenAI response had no choices.")
-                        print(f"[AGENT_DEBUG] Raw JSON keys: {list(result.keys())}")
-                    return None
-
-                msg = (choices[0].get("message") or {})
-                content = (msg.get("content") or "").strip()
+                payload = response.json()
+                content = _extract_text_from_responses_api(payload)
 
                 if debug:
-                    preview = content[:400].replace("\n", "\\n")
+                    preview = (content[:400] if content else "").replace("\n", "\\n")
                     print(f"[AGENT_DEBUG] OpenAI content preview (first 400 chars): {preview}")
 
-                return content or None
+                return content.strip() if content and content.strip() else None
 
             # Non-200: log useful error
+            err_json = None
             if debug:
                 print(f"[AGENT_DEBUG] OpenAI non-200 status={status}")
                 try:
@@ -178,7 +200,24 @@ def call_openai(prompt: str, api_key: str) -> Optional[str]:
                 except Exception:
                     print(f"[AGENT_DEBUG] OpenAI error text: {response.text[:2000]}")
 
-            # Retry on rate limit / server errors
+            # Extract error code if present
+            if err_json is None:
+                try:
+                    err_json = response.json()
+                except Exception:
+                    err_json = None
+
+            err_code = None
+            if isinstance(err_json, dict):
+                err = err_json.get("error") or {}
+                err_code = err.get("code") or err.get("type")
+
+            # Quota: retries are pointless
+            if err_code == "insufficient_quota":
+                print("OpenAI quota exhausted / billing not active for this API key (insufficient_quota).")
+                return None
+
+            # Retry on transient errors
             if status in (429, 500, 502, 503, 504) and attempt < retries:
                 time.sleep(backoff_s)
                 backoff_s *= 2
