@@ -227,6 +227,19 @@ class Runner:
                     f"Patch targets placeholder file path '{header_path}'. "
                     "LLM must use REAL file paths from the repository (see TARGET FILES and CURRENT FILE CONTENTS)."
                 )
+            
+            # Check if file exists (unless it's a new file indicated by /dev/null)
+            if header_path != "/dev/null":
+                actual_file = base_path / header_path
+                if not actual_file.exists():
+                    return False, (
+                        f"Patch targets file '{header_path}' which does not exist in the repository. "
+                        f"Use REAL file paths from the repository. If creating a new file, use '--- /dev/null'."
+                    )
+                elif not actual_file.is_file():
+                    return False, (
+                        f"Patch targets '{header_path}' which exists but is not a regular file."
+                    )
 
         with tempfile.NamedTemporaryFile(mode="w", suffix=".patch", delete=False) as f:
             f.write(clean_patch)
@@ -242,19 +255,74 @@ class Runner:
             if check.returncode != 0:
                 # Extract line number from error if present (e.g., "error: corrupt patch at line 20")
                 error_msg = check.stderr or ""
-                # Try to show the problematic line for better debugging
-                line_match = None
                 import re
+                
+                # Enhanced debugging: extract hunk info and compare with actual file
                 line_num_match = re.search(r"line (\d+)", error_msg)
                 if line_num_match:
                     try:
-                        line_num = int(line_num_match.group(1))
+                        patch_line_num = int(line_num_match.group(1))
                         patch_lines = clean_patch.split("\n")
-                        if 0 < line_num <= len(patch_lines):
-                            problematic_line = patch_lines[line_num - 1]
-                            error_msg = f"{error_msg}\nProblematic line {line_num}: {problematic_line[:200]}"
-                    except (ValueError, IndexError):
-                        pass
+                        if 0 < patch_line_num <= len(patch_lines):
+                            problematic_patch_line = patch_lines[patch_line_num - 1]
+                            error_msg = f"{error_msg}\nProblematic patch line {patch_line_num}: {problematic_patch_line[:200]}"
+                            
+                            # Try to extract file path and hunk info for better debugging
+                            hunk_match = re.search(r"^@@\s+-(\d+),(\d+)\s+\+(\d+),(\d+)\s+@@", problematic_patch_line)
+                            if hunk_match:
+                                old_start = int(hunk_match.group(1))
+                                old_count = int(hunk_match.group(2))
+                                
+                                # Find the file path from the patch
+                                file_path = None
+                                for i in range(patch_line_num - 1, -1, -1):
+                                    if i < len(patch_lines):
+                                        line = patch_lines[i]
+                                        if line.startswith("--- "):
+                                            path_part = line[4:].strip()
+                                            if path_part.startswith("a/"):
+                                                path_part = path_part[2:]
+                                            if path_part != "/dev/null":
+                                                file_path = path_part
+                                                break
+                                
+                                # If we found the file, show what's actually there
+                                if file_path:
+                                    actual_file = base_path / file_path
+                                    if actual_file.exists() and actual_file.is_file():
+                                        try:
+                                            file_content = actual_file.read_text(encoding="utf-8")
+                                            file_lines = file_content.split("\n")
+                                            # Show context around the problematic line
+                                            context_start = max(0, old_start - 5)
+                                            context_end = min(len(file_lines), old_start + old_count + 5)
+                                            actual_context = "\n".join([
+                                                f"{i+1:4d}: {line}" 
+                                                for i, line in enumerate(file_lines[context_start:context_end], start=context_start)
+                                            ])
+                                            error_msg += f"\n\nActual file content around line {old_start} in {file_path}:\n{actual_context}"
+                                            
+                                            # Show what the patch expects
+                                            patch_context_lines = []
+                                            in_hunk = False
+                                            for i, line in enumerate(patch_lines):
+                                                if line.startswith("@@") and i < patch_line_num:
+                                                    in_hunk = True
+                                                    patch_context_lines = []
+                                                elif in_hunk and (line.startswith(" ") or line.startswith("-") or line.startswith("+")):
+                                                    patch_context_lines.append(line)
+                                                elif line.startswith("@@") and i >= patch_line_num:
+                                                    break
+                                            
+                                            if patch_context_lines:
+                                                error_msg += f"\n\nWhat the patch expects (first 10 context lines):\n" + "\n".join(patch_context_lines[:10])
+                                        except Exception as e:
+                                            if self._debug_enabled():
+                                                error_msg += f"\n[Could not read file for debugging: {e}]"
+                    except (ValueError, IndexError) as e:
+                        if self._debug_enabled():
+                            error_msg += f"\n[Error extracting debug info: {e}]"
+                
                 return False, f"Patch check failed: {error_msg}"
 
             apply = self._run_cmd(
