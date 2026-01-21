@@ -560,9 +560,10 @@ See diff for details.
                 # 4. Gather file content snippets (prioritized)
                 if milestone.get("target_files") and all_matching_files:
                     snippets: List[str] = []
-                    max_files = 10  # Increased from 8
-                    max_chars_per_file = 25000  # Increased from 20000
-                    max_total_chars = 120000  # Increased from 80000 (~300K tokens)
+                    max_files_full = 3  # Top 3 files get FULL content (no truncation)
+                    max_files_total = 10  # Total files to include
+                    max_chars_per_file_truncated = 50000  # For files beyond top 3
+                    max_total_chars = 200000  # Increased total budget (~500K tokens)
                     matched = 0
                     total_chars = 0
                     
@@ -586,8 +587,8 @@ See diff for details.
                     
                     all_matching_files.sort(key=priority_score, reverse=True)
                     
-                    # Read top priority files with full content when possible
-                    for rel_path in all_matching_files[:max_files]:
+                    # Read files: full content for top priority, truncated for others
+                    for idx, rel_path in enumerate(all_matching_files[:max_files_total]):
                         if total_chars >= max_total_chars:
                             break
                         file_path = (self.repo_path / rel_path)
@@ -595,26 +596,40 @@ See diff for details.
                             continue
                         try:
                             text = file_path.read_text(encoding="utf-8")
-                            # Take up to max_chars_per_file, but respect total budget
-                            remaining_budget = max_total_chars - total_chars
-                            chars_to_take = min(max_chars_per_file, remaining_budget, len(text))
-                            snippet = text[:chars_to_take]
+                            file_lines = text.count('\n') + (1 if text else 0)
                             
-                            # Add file metadata
-                            file_info = f"--- FILE: {rel_path} ({len(text)} total chars) ---\n"
-                            if chars_to_take < len(text):
-                                snippet += f"\n... [file truncated, {len(text) - chars_to_take} more chars remain]"
+                            # Top priority files get FULL content (no truncation)
+                            is_full_file = idx < max_files_full
+                            
+                            if is_full_file:
+                                # Full file content - critical for accurate line numbers
+                                file_info = f"--- FILE: {rel_path} (FULL CONTENT, {file_lines} lines, {len(text)} chars) ---\n"
+                                snippet = text
+                                chars_to_take = len(text)
+                            else:
+                                # Truncated content for lower priority files
+                                remaining_budget = max_total_chars - total_chars
+                                chars_to_take = min(max_chars_per_file_truncated, remaining_budget, len(text))
+                                snippet = text[:chars_to_take]
+                                
+                                file_info = f"--- FILE: {rel_path} (PARTIAL: first {chars_to_take} of {len(text)} chars, {file_lines} total lines) ---\n"
+                                if chars_to_take < len(text):
+                                    snippet += f"\n... [file truncated, {len(text) - chars_to_take} more chars remain]"
                             
                             snippets.append(file_info + snippet + "\n")
                             matched += 1
                             total_chars += chars_to_take
-                            if matched >= max_files or total_chars >= max_total_chars:
+                            
+                            if matched >= max_files_total or total_chars >= max_total_chars:
                                 break
                         except Exception:
                             continue
                     
                     if snippets:
-                        context_parts.append(f"\nFILE CONTENTS (top {len(snippets)} prioritized files):\n" + "\n".join(snippets))
+                        full_count = min(max_files_full, len(snippets))
+                        context_parts.append(
+                            f"\nFILE CONTENTS ({full_count} full files + {len(snippets) - full_count} partial files):\n" + "\n".join(snippets)
+                        )
                 
                 if context_parts:
                     current_files_snippet = "\n\n".join(context_parts)

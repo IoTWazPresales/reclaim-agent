@@ -106,10 +106,16 @@ def build_milestone_prompt(
 
     if current_files:
         files_context += f"\n\nREPOSITORY CONTEXT (comprehensive information about the codebase):\n{current_files}\n\n"
-        files_context += "IMPORTANT: Use the REPOSITORY STRUCTURE above to understand the actual file paths. "
+        files_context += "CRITICAL INSTRUCTIONS FOR PATCH GENERATION:\n"
+        files_context += "- Files marked 'FULL CONTENT' contain the COMPLETE file - use the EXACT line numbers from these files.\n"
+        files_context += "- Files marked 'PARTIAL' are truncated - be cautious with line numbers in these files.\n"
+        files_context += "- When generating hunks (e.g., @@ -441,6 +491,22 @@), the line numbers MUST match the actual file content.\n"
+        files_context += "- For files with FULL CONTENT, you can see the exact line numbers - use them precisely.\n"
+        files_context += "- Include sufficient context lines (at least 3-5 before and after changes) to help git apply match correctly.\n"
+        files_context += "\nUse the REPOSITORY STRUCTURE to understand file paths. "
         files_context += "Use ALL FILES MATCHING TARGET PATTERNS to see what files exist. "
-        files_context += "Use FILE CONTENTS to understand the code patterns and structure. "
-        files_context += "Use KEY CONFIGURATION FILES to understand project settings and dependencies."
+        files_context += "Use FILE CONTENTS to understand code patterns. "
+        files_context += "Use KEY CONFIGURATION FILES to understand project settings."
 
     rules_text = "\n".join([f"- {rule}" for rule in repo_rules])
 
