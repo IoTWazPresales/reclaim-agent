@@ -448,45 +448,73 @@ See diff for details.
         update_milestone_status(self.config.milestones, milestone_id, "in_progress")
         self.config.save()
 
-        # Optionally gather a small amount of file context for the LLM based on target_files.
+        # Gather file context for the LLM - prioritize most relevant files
         current_files_snippet: Optional[str] = None
         try:
             if self.repo_path and milestone.get("target_files"):
                 snippets: List[str] = []
-                max_files = 5
-                max_chars_per_file = 2000
+                max_files = 10  # Increased from 5
+                max_chars_per_file = 4000  # Increased from 2000
                 matched = 0
+                
+                # Collect all candidate files first
+                all_candidates: List[str] = []
                 for pattern in milestone["target_files"]:
-                    # Use git ls-files for globbing inside the repo to respect .gitignore.
                     result = self._run_cmd(
                         ["git", "ls-files", pattern],
                         cwd=self.repo_path,
                         timeout=60,
                         label=f"git ls-files {pattern}",
                     )
-                    if result.returncode != 0:
+                    if result.returncode == 0:
+                        for rel_path in (result.stdout or "").splitlines():
+                            if rel_path.strip():
+                                all_candidates.append(rel_path.strip())
+                
+                # Prioritize files that are most likely relevant based on milestone title
+                # Look for keywords in milestone title to prioritize
+                title_lower = milestone.get("title", "").lower()
+                priority_keywords = []
+                if "training" in title_lower:
+                    priority_keywords.extend(["training", "Training"])
+                if "screen" in title_lower or "ui" in title_lower or "panel" in title_lower:
+                    priority_keywords.extend(["Screen", "screen", "component", "Component"])
+                if "preview" in title_lower:
+                    priority_keywords.extend(["preview", "Preview"])
+                
+                # Sort candidates: files with priority keywords first
+                def priority_score(path: str) -> int:
+                    score = 0
+                    for keyword in priority_keywords:
+                        if keyword in path:
+                            score += 10
+                    return score
+                
+                all_candidates.sort(key=priority_score, reverse=True)
+                
+                # Read top priority files
+                for rel_path in all_candidates[:max_files]:
+                    file_path = (self.repo_path / rel_path)
+                    if not file_path.is_file():
                         continue
-                    for rel_path in (result.stdout or "").splitlines():
-                        if not rel_path.strip():
-                            continue
-                        file_path = (self.repo_path / rel_path.strip())
-                        if not file_path.is_file():
-                            continue
-                        try:
-                            text = file_path.read_text(encoding="utf-8")
-                        except Exception:
-                            continue
+                    try:
+                        text = file_path.read_text(encoding="utf-8")
                         snippet = text[:max_chars_per_file]
-                        snippets.append(f"--- FILE: {rel_path.strip()} ---\n{snippet}\n")
+                        snippets.append(f"--- FILE: {rel_path} ---\n{snippet}\n")
                         matched += 1
                         if matched >= max_files:
                             break
-                    if matched >= max_files:
-                        break
+                    except Exception:
+                        continue
+                
                 if snippets:
                     current_files_snippet = "\n".join(snippets)
-        except Exception:
+                    if self._debug_enabled():
+                        print(f"[AGENT_DEBUG] Gathered context from {len(snippets)} files")
+        except Exception as e:
             # Context gathering should never break the run.
+            if self._debug_enabled():
+                print(f"[AGENT_DEBUG] File context gathering failed: {e}")
             current_files_snippet = None
 
         prompt = build_milestone_prompt(

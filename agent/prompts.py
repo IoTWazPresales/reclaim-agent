@@ -56,10 +56,12 @@ CRITICAL FILE PATH RULES:
 - NEVER use placeholder names like "placeholder", "dummy", "example", "test.ts"
 - All file paths must be relative to the repository root (e.g., app/src/...)
 
-IF YOU CANNOT SAFELY GENERATE A REAL PATCH:
-- If the task is unclear, context is insufficient, or you cannot determine real file paths,
-- Output exactly: NO_PATCH
-- Do NOT output a placeholder or fake diff.
+WHEN TO USE NO_PATCH (ONLY AS LAST RESORT):
+- ONLY use NO_PATCH if the task is fundamentally impossible or you have ZERO context about the codebase structure.
+- If you have file contents above, milestone spec, and target file patterns, you SHOULD be able to generate a patch.
+- Use the CURRENT FILE CONTENTS above to understand the codebase structure and patterns.
+- You can create new files in paths matching TARGET FILES patterns if needed.
+- Only output NO_PATCH if you truly cannot proceed (e.g., missing critical dependencies, completely unclear requirements).
 
 EXAMPLE of correct format:
 --- a/app/src/example.ts
@@ -136,10 +138,12 @@ CRITICAL FILE PATH RULES:
 - If creating a new file, use a path that matches the TARGET FILES patterns
 - All file paths must be relative to the repository root (e.g., app/src/lib/training/...)
 
-IF YOU CANNOT SAFELY GENERATE A REAL PATCH:
-- If the task is unclear, context is insufficient, or you cannot determine real file paths,
-- Output exactly: NO_PATCH
-- Do NOT output a placeholder or fake diff.
+WHEN TO USE NO_PATCH (ONLY AS LAST RESORT):
+- ONLY use NO_PATCH if the task is fundamentally impossible or you have ZERO context about the codebase structure.
+- If you have file contents above, milestone spec, and target file patterns, you SHOULD be able to generate a patch.
+- Use the CURRENT FILE CONTENTS above to understand the codebase structure and patterns.
+- You can create new files in paths matching TARGET FILES patterns if needed.
+- Only output NO_PATCH if you truly cannot proceed (e.g., missing critical dependencies, completely unclear requirements).
 
 EXAMPLE of correct format:
 --- a/app/src/example.ts
