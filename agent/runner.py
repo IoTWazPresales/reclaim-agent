@@ -178,17 +178,55 @@ class Runner:
 
         clean_patch = "\n".join(lines[diff_start:])
 
-        # Validate patch format: check for placeholder hunk headers like @@ ... @@
+        # ---------------------------
+        # Basic structural validation
+        # ---------------------------
         import re
-        hunk_header_pattern = re.compile(r'^@@\s+.*\s+@@', re.MULTILINE)
-        placeholder_pattern = re.compile(r'^@@\s+\.\.\..*@@', re.MULTILINE)
-        
-        if placeholder_pattern.search(clean_patch):
-            return False, "Patch contains placeholder hunk headers (@@ ... @@). LLM must provide REAL line numbers like @@ -10,5 +10,8 @@"
-        
+
+        hunk_header_pattern = re.compile(r"^@@\s+.*\s+@@", re.MULTILINE)
+        placeholder_hunk_pattern = re.compile(r"^@@\s+\.\.\..*@@", re.MULTILINE)
+        zero_length_hunk_pattern = re.compile(r"^@@\s+-\d+,0\s+\+\d+,0\s+@@", re.MULTILINE)
+
+        # Reject obvious placeholder hunks (e.g. @@ ... @@)
+        if placeholder_hunk_pattern.search(clean_patch):
+            return False, (
+                "Patch contains placeholder hunk headers (@@ ... @@). "
+                "LLM must provide REAL line numbers like @@ -10,5 +10,8 @@."
+            )
+
+        # Reject zero-length hunks like @@ -1,0 +0,0 @@ (no actual changes)
+        if zero_length_hunk_pattern.search(clean_patch):
+            return False, (
+                "Patch contains zero-length hunks (e.g. @@ -1,0 +0,0 @@). "
+                "Each hunk must add and/or remove at least one line."
+            )
+
         # Check if patch has any hunk headers at all
         if not hunk_header_pattern.search(clean_patch):
-            return False, "Patch is missing hunk headers. Must include line numbers like @@ -10,5 +10,8 @@"
+            return False, "Patch is missing hunk headers. Must include line numbers like @@ -10,5 +10,8 @@."
+
+        # ---------------------------
+        # File header sanity checks
+        # ---------------------------
+        first_header = None
+        for l in clean_patch.split("\n"):
+            if l.startswith("--- "):
+                first_header = l
+                break
+
+        if first_header:
+            header_path = first_header[4:].strip()  # strip leading '--- '
+            # Normalize typical git diff prefix
+            if header_path.startswith("a/"):
+                header_path = header_path[2:]
+
+            # Reject obvious placeholder filenames
+            lowered = header_path.lower()
+            if "placeholder" in lowered or "dummy" in lowered or "example" == lowered:
+                return False, (
+                    f"Patch targets placeholder file path '{header_path}'. "
+                    "LLM must use REAL file paths from the repository (see TARGET FILES and CURRENT FILE CONTENTS)."
+                )
 
         with tempfile.NamedTemporaryFile(mode="w", suffix=".patch", delete=False) as f:
             f.write(clean_patch)
