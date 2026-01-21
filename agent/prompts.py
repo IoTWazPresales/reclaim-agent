@@ -135,12 +135,17 @@ CONSTRAINTS:
 - Maximum {max_files} files changed
 - Maximum {max_lines} lines net change (additions - deletions)
 
-OUTPUT FORMAT (STRICT):
-- Output ONLY a valid unified diff patch that `git apply` can parse.
-- Use REAL line numbers in hunk headers: @@ -10,5 +10,8 @@ NOT @@ ... @@
-- Include sufficient context lines (at least 3 before and after changes).
-- NO explanations, NO markdown fences, NO commentary, NO placeholders.
-- Start immediately with:  --- a/path/to/file.ext
+OUTPUT FORMAT (NEW APPROACH - NO LINE NUMBERS NEEDED):
+- Output the COMPLETE modified file content for each file you need to change.
+- Format: For each file, output exactly:
+  ===FILE_START: <file_path>===
+  <complete file content>
+  ===FILE_END: <file_path>===
+- For new files, output the complete file content.
+- For existing files, output the COMPLETE file with your modifications included.
+- NO unified diffs, NO line numbers, NO hunk headers - just complete file content.
+- NO explanations, NO markdown fences, NO commentary between files.
+- You can output multiple files, one after another.
 
 CRITICAL FILE PATH RULES:
 - You MUST use REAL file paths from the TARGET FILES list above.
@@ -150,20 +155,21 @@ CRITICAL FILE PATH RULES:
 
 WHEN TO USE NO_PATCH (ONLY AS LAST RESORT):
 - ONLY use NO_PATCH if the task is fundamentally impossible or you have ZERO context about the codebase structure.
-- If you have file contents above, milestone spec, and target file patterns, you SHOULD be able to generate a patch.
+- If you have file contents above, milestone spec, and target file patterns, you SHOULD be able to generate the modified files.
 - Use the CURRENT FILE CONTENTS above to understand the codebase structure and patterns.
 - You can create new files in paths matching TARGET FILES patterns if needed.
 - Only output NO_PATCH if you truly cannot proceed (e.g., missing critical dependencies, completely unclear requirements).
 
 EXAMPLE of correct format:
---- a/app/src/example.ts
-+++ b/app/src/example.ts
-@@ -15,7 +15,9 @@ export function example() {{
+===FILE_START: app/src/example.ts===
+// Example file
+export function example() {{
   const x = 1;
   const y = 2;
-+  const z = 3;
-  return x + y;
- }}
+  const z = 3;
+  return x + y + z;
+}}
+===FILE_END: app/src/example.ts===
 
 Begin now:
 """

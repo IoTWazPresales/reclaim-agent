@@ -164,6 +164,128 @@ class Runner:
 
         return failing
 
+    def _parse_file_content_format(self, content: str, base_path: Path) -> Tuple[bool, Optional[str], Optional[str]]:
+        """
+        Parse the new file content format (===FILE_START: path=== ... ===FILE_END: path===)
+        and generate a unified diff using git diff.
+        
+        Returns: (success, error_message, unified_diff_patch)
+        """
+        import re
+        
+        # Pattern to match file blocks
+        file_pattern = re.compile(r'===FILE_START:\s*(.+?)===\s*\n(.*?)\n===FILE_END:\s*\1===', re.DOTALL)
+        
+        files_to_write = {}
+        matches = list(file_pattern.finditer(content))
+        
+        if not matches:
+            return False, "No file blocks found in format ===FILE_START: path=== ... ===FILE_END: path===", None
+        
+        # Parse all file blocks
+        for match in matches:
+            file_path = match.group(1).strip()
+            file_content = match.group(2)
+            
+            # Normalize path (remove leading/trailing whitespace, handle relative paths)
+            if file_path.startswith("/"):
+                file_path = file_path[1:]
+            
+            files_to_write[file_path] = file_content
+        
+        if not files_to_write:
+            return False, "No valid file blocks found", None
+        
+        # Write files temporarily, generate diff, then restore
+        import tempfile
+        import shutil
+        
+        written_files = []
+        backups = {}  # file_path -> backup_path
+        
+        try:
+            # Step 1: Backup existing files and write new content
+            for file_path, file_content in files_to_write.items():
+                actual_file = base_path / file_path
+                
+                # Backup existing file if it exists
+                if actual_file.exists() and actual_file.is_file():
+                    backup_path = base_path / f"{file_path}.agent_backup"
+                    shutil.copy2(actual_file, backup_path)
+                    backups[file_path] = backup_path
+                
+                # Write new content
+                actual_file.parent.mkdir(parents=True, exist_ok=True)
+                actual_file.write_text(file_content, encoding="utf-8")
+                written_files.append(file_path)
+            
+            # Step 2: Stage all files
+            for file_path in written_files:
+                self._run_cmd(
+                    ["git", "add", file_path],
+                    cwd=base_path,
+                    timeout=30,
+                    label=f"git add {file_path}",
+                )
+            
+            # Step 3: Generate unified diff
+            diff_result = self._run_cmd(
+                ["git", "diff", "--cached", "--no-color"],
+                cwd=base_path,
+                timeout=60,
+                label="git diff --cached",
+            )
+            
+            if diff_result.returncode != 0:
+                raise RuntimeError(f"Failed to generate diff: {diff_result.stderr}")
+            
+            unified_diff = diff_result.stdout or ""
+            
+            if not unified_diff.strip():
+                raise RuntimeError("Generated diff is empty (no changes detected)")
+            
+            # Step 4: Unstage and restore original files
+            self._run_cmd(
+                ["git", "reset", "HEAD", "--"] + written_files,
+                cwd=base_path,
+                timeout=30,
+                label="git reset",
+            )
+            
+            # Restore original files from backups
+            for file_path, backup_path in backups.items():
+                shutil.move(backup_path, base_path / file_path)
+            
+            # Remove new files that didn't exist before
+            for file_path in written_files:
+                if file_path not in backups:
+                    actual_file = base_path / file_path
+                    if actual_file.exists():
+                        actual_file.unlink()
+            
+            return True, None, unified_diff
+            
+        except Exception as e:
+            # Cleanup: restore all backups
+            for file_path, backup_path in backups.items():
+                try:
+                    if backup_path.exists():
+                        shutil.move(backup_path, base_path / file_path)
+                except:
+                    pass
+            
+            # Remove new files on error
+            for file_path in written_files:
+                if file_path not in backups:
+                    try:
+                        actual_file = base_path / file_path
+                        if actual_file.exists():
+                            actual_file.unlink()
+                    except:
+                        pass
+            
+            return False, f"Error processing file content format: {e}", None
+
     def apply_patch(self, patch: str, base_path: Path) -> Tuple[bool, Optional[str]]:
         """Apply unified diff patch to repository."""
         lines = patch.strip().split("\n")
@@ -815,7 +937,21 @@ See diff for details.
                     self._fail(f"Patch does not touch any allowed target files")
                     return None
 
-        success, error = self.apply_patch(patch, self.repo_path)
+        # Try new file content format first (===FILE_START: path=== ... ===FILE_END: path===)
+        # If that fails, fall back to unified diff format
+        actual_patch = patch
+        parse_success, parse_error, generated_diff = self._parse_file_content_format(patch, self.repo_path)
+        if parse_success and generated_diff:
+            print("Successfully parsed file content format, using generated diff")
+            actual_patch = generated_diff
+        elif parse_error and "No file blocks found" in parse_error:
+            # Not in new format, treat as unified diff
+            print("Not in file content format, treating as unified diff")
+        else:
+            # Parse error but might still be a unified diff, try both
+            print(f"File content format parse had issues: {parse_error}, trying unified diff format")
+
+        success, error = self.apply_patch(actual_patch, self.repo_path)
         if not success:
             update_milestone_status(self.config.milestones, milestone_id, "blocked", f"Patch apply failed: {error}")
             self.config.save()
