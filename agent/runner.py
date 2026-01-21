@@ -15,6 +15,7 @@ from .config import Config
 from .github_api import GitHubAPI
 from .prompts import build_fix_prompt, build_milestone_prompt, call_openai
 from .milestones import get_next_todo_milestone, update_milestone_status
+from .knowledge_base import KnowledgeBaseGenerator
 
 
 class Runner:
@@ -24,6 +25,7 @@ class Runner:
         self.config = config
         self.github = GitHubAPI(config.github_token, config.repo_name)
         self.repo_path = Path(config.repo_path) if config.repo_path else None
+        self._knowledge_base: Optional[str] = None
 
     # -------------------------
     # Debug / strict helpers
@@ -42,6 +44,39 @@ class Runner:
         print(msg)
         if self._strict_enabled():
             raise RuntimeError(msg)
+    
+    def _load_knowledge_base(self) -> str:
+        """Load or generate knowledge base."""
+        if self._knowledge_base is not None:
+            return self._knowledge_base
+        
+        # Try to load existing knowledge base
+        kb_path = self.repo_path / "KNOWLEDGE_BASE.md" if self.repo_path else None
+        if kb_path and kb_path.exists():
+            try:
+                self._knowledge_base = kb_path.read_text(encoding="utf-8")
+                if self._debug_enabled():
+                    print(f"[AGENT_DEBUG] Loaded knowledge base from {kb_path} ({len(self._knowledge_base)} chars)")
+                return self._knowledge_base
+            except Exception as e:
+                if self._debug_enabled():
+                    print(f"[AGENT_DEBUG] Failed to load knowledge base: {e}")
+        
+        # Generate knowledge base if it doesn't exist
+        if self.repo_path:
+            try:
+                generator = KnowledgeBaseGenerator(str(self.repo_path))
+                self._knowledge_base = generator.generate()
+                # Optionally save it (but don't commit - it's generated)
+                if self._debug_enabled():
+                    print(f"[AGENT_DEBUG] Generated knowledge base ({len(self._knowledge_base)} chars)")
+                return self._knowledge_base
+            except Exception as e:
+                if self._debug_enabled():
+                    print(f"[AGENT_DEBUG] Failed to generate knowledge base: {e}")
+        
+        # Fallback: return empty string
+        return ""
 
     # -------------------------
     # Command runner
@@ -642,13 +677,20 @@ See diff for details.
         update_milestone_status(self.config.milestones, milestone_id, "in_progress")
         self.config.save()
 
-        # Gather comprehensive context for the LLM
+        # Gather context for the LLM using knowledge base + targeted file reading
         current_files_snippet: Optional[str] = None
         try:
             if self.repo_path:
                 context_parts: List[str] = []
                 
-                # 1. Get directory structure overview for target areas
+                # 0. Load knowledge base (comprehensive codebase understanding)
+                kb_content = self._load_knowledge_base()
+                if kb_content:
+                    context_parts.append("=== KNOWLEDGE BASE (Complete Codebase Understanding) ===")
+                    context_parts.append(kb_content)
+                    context_parts.append("=== END KNOWLEDGE BASE ===\n")
+                
+                # 1. Get directory structure overview for target areas (simplified - KB has structure)
                 if milestone.get("target_files"):
                     structure_parts: List[str] = []
                     all_files_for_structure: List[str] = []

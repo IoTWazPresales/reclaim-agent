@@ -121,6 +121,12 @@ def build_milestone_prompt(
 
     return f"""You are a code modification agent for the Reclaim repository. Complete the milestone below.
 
+📚 CONTEXT PROVIDED:
+- KNOWLEDGE BASE: Complete codebase understanding (architecture, structure, patterns, navigation)
+- TARGET FILES: Specific files you need to modify (full content provided)
+- Use the KNOWLEDGE BASE to understand the codebase structure and patterns
+- Use TARGET FILES to see exactly what needs to be changed
+
 ⚠️ CRITICAL OUTPUT FORMAT - READ THIS FIRST ⚠️
 You MUST output complete file content, NOT unified diffs. The format is:
 
