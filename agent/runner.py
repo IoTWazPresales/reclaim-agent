@@ -65,11 +65,18 @@ class Runner:
         # Generate knowledge base if it doesn't exist
         if self.repo_path:
             try:
-                generator = KnowledgeBaseGenerator(str(self.repo_path))
+                # Use LLM analysis if API key is available (hybrid approach)
+                use_llm = bool(self.config.openai_api_key)
+                generator = KnowledgeBaseGenerator(
+                    str(self.repo_path),
+                    openai_api_key=self.config.openai_api_key if use_llm else None,
+                    use_llm_analysis=use_llm
+                )
                 self._knowledge_base = generator.generate()
                 # Optionally save it (but don't commit - it's generated)
                 if self._debug_enabled():
-                    print(f"[AGENT_DEBUG] Generated knowledge base ({len(self._knowledge_base)} chars)")
+                    llm_status = "with LLM semantic analysis" if use_llm else "structure-only"
+                    print(f"[AGENT_DEBUG] Generated knowledge base {llm_status} ({len(self._knowledge_base)} chars)")
                 return self._knowledge_base
             except Exception as e:
                 if self._debug_enabled():

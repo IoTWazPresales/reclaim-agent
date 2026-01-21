@@ -2,6 +2,10 @@
 
 Analyzes the codebase structure, architecture, and patterns to create
 a comprehensive knowledge base that the agent can use for context.
+
+Uses hybrid approach:
+- Python analysis (zero tokens): structure, file catalog, basic patterns
+- LLM analysis (gpt-4o-mini, cheap): semantic understanding of key modules
 """
 
 import os
@@ -15,10 +19,12 @@ from collections import defaultdict
 class KnowledgeBaseGenerator:
     """Generates a comprehensive knowledge base from the codebase."""
     
-    def __init__(self, repo_path: str):
+    def __init__(self, repo_path: str, openai_api_key: Optional[str] = None, use_llm_analysis: bool = True):
         self.repo_path = Path(repo_path)
         self.app_path = self.repo_path / "app"
         self.src_path = self.repo_path / "app" / "src"
+        self.openai_api_key = openai_api_key
+        self.use_llm_analysis = use_llm_analysis and openai_api_key is not None
         
     def generate(self) -> str:
         """Generate the complete knowledge base markdown."""
@@ -47,6 +53,12 @@ class KnowledgeBaseGenerator:
         
         # 8. Common Tasks
         sections.append(self._generate_common_tasks())
+        
+        # 9. Semantic Analysis (LLM-generated understanding of key modules)
+        if self.use_llm_analysis:
+            semantic_analysis = self._generate_semantic_analysis()
+            if semantic_analysis:
+                sections.append(semantic_analysis)
         
         return "\n\n".join(sections)
     
@@ -452,6 +464,161 @@ app/
 2. Run: `cd app && npx vitest run --passWithNoTests` (Unit tests)
 3. Fix any type errors or test failures
 """
+    
+    def _generate_semantic_analysis(self) -> Optional[str]:
+        """Generate semantic analysis of key modules using LLM (gpt-4o-mini)."""
+        if not self.use_llm_analysis:
+            return None
+        
+        # Key modules to analyze semantically
+        key_modules = [
+            {
+                "name": "Training Module",
+                "path": "app/src/lib/training",
+                "files": [
+                    "app/src/lib/training/engine/index.ts",
+                    "app/src/lib/training/types.ts",
+                    "app/src/lib/training/programPlanner.ts",
+                    "app/src/lib/training/setupMappings.ts",
+                ],
+                "description": "Core training/workout generation logic"
+            },
+            {
+                "name": "Training Screens",
+                "path": "app/src/screens/training",
+                "files": [
+                    "app/src/screens/training/TrainingSetupScreen.tsx",
+                    "app/src/screens/training/TrainingScreen.tsx",
+                ],
+                "description": "Training UI screens and user flows"
+            },
+            {
+                "name": "Training Components",
+                "path": "app/src/components/training",
+                "files": [
+                    "app/src/components/training/FullSessionPanel.tsx",
+                    "app/src/components/training/FourWeekPreview.tsx",
+                ],
+                "description": "Training UI components"
+            },
+        ]
+        
+        semantic_parts = ["## Semantic Analysis (LLM-Generated Understanding)\n"]
+        semantic_parts.append("This section provides semantic understanding of key modules, generated using LLM analysis (gpt-4o-mini).\n")
+        
+        for module in key_modules:
+            analysis = self._analyze_module_semantically(module)
+            if analysis:
+                semantic_parts.append(analysis)
+                semantic_parts.append("")  # Blank line between modules
+        
+        return "\n".join(semantic_parts) if len(semantic_parts) > 2 else None
+    
+    def _analyze_module_semantically(self, module: Dict[str, Any]) -> Optional[str]:
+        """Analyze a module semantically using LLM."""
+        try:
+            # Read key files from the module
+            file_contents = []
+            for file_path_str in module.get("files", []):
+                file_path = self.repo_path / file_path_str
+                if file_path.exists():
+                    try:
+                        content = file_path.read_text(encoding="utf-8")
+                        # Limit file size to avoid token bloat (first 3000 lines or 100k chars)
+                        lines = content.split("\n")
+                        if len(lines) > 3000:
+                            content = "\n".join(lines[:3000]) + "\n... [truncated for analysis]"
+                        elif len(content) > 100000:
+                            content = content[:100000] + "\n... [truncated for analysis]"
+                        file_contents.append(f"### {file_path_str}\n```typescript\n{content}\n```")
+                    except Exception as e:
+                        if self._debug_enabled():
+                            print(f"[KB] Failed to read {file_path_str}: {e}")
+            
+            if not file_contents:
+                return None
+            
+            # Build prompt for semantic analysis
+            prompt = f"""Analyze the following {module['name']} code and provide a comprehensive understanding:
+
+{module.get('description', '')}
+
+Files:
+{chr(10).join(file_contents[:3])}  # Limit to 3 files to control token usage
+
+Provide:
+1. **Purpose**: What does this module do? What problem does it solve?
+2. **Key Functions**: What are the main functions and what do they do?
+3. **Data Flow**: How does data flow through this module?
+4. **Dependencies**: What other modules/files does it depend on?
+5. **Usage Patterns**: How is this module typically used by other parts of the codebase?
+6. **Important Types/Interfaces**: What are the key types and their purposes?
+7. **Business Logic**: What are the core business rules/logic implemented here?
+
+Format as clear, structured markdown. Be specific and reference actual function names, types, and patterns from the code.
+"""
+            
+            # Call LLM (gpt-4o-mini for cost efficiency)
+            response = self._call_llm_for_analysis(prompt)
+            if response:
+                return f"### {module['name']}\n\n{response}"
+            
+        except Exception as e:
+            if self._debug_enabled():
+                print(f"[KB] Semantic analysis failed for {module['name']}: {e}")
+        
+        return None
+    
+    def _call_llm_for_analysis(self, prompt: str) -> Optional[str]:
+        """Call OpenAI API (gpt-4o-mini) for semantic analysis."""
+        if not self.openai_api_key:
+            return None
+        
+        try:
+            import requests
+            
+            url = "https://api.openai.com/v1/chat/completions"
+            headers = {
+                "Authorization": f"Bearer {self.openai_api_key}",
+                "Content-Type": "application/json",
+            }
+            
+            data = {
+                "model": "gpt-4o-mini",  # Cheap model for analysis
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "You are a code analysis assistant. Analyze code and provide clear, structured documentation of its purpose, functions, data flow, and business logic."
+                    },
+                    {
+                        "role": "user",
+                        "content": prompt
+                    }
+                ],
+                "temperature": 0.3,  # Lower temperature for more consistent analysis
+                "max_tokens": 2000,  # Limit output to control costs
+            }
+            
+            response = requests.post(url, json=data, headers=headers, timeout=60)
+            response.raise_for_status()
+            
+            result = response.json()
+            content = result.get("choices", [{}])[0].get("message", {}).get("content", "")
+            
+            if self._debug_enabled():
+                usage = result.get("usage", {})
+                print(f"[KB] LLM analysis: {usage.get('prompt_tokens', 0)} input, {usage.get('completion_tokens', 0)} output tokens")
+            
+            return content.strip() if content else None
+            
+        except Exception as e:
+            if self._debug_enabled():
+                print(f"[KB] LLM call failed: {e}")
+            return None
+    
+    def _debug_enabled(self) -> bool:
+        """Check if debug mode is enabled."""
+        return os.getenv("AGENT_DEBUG", "").strip().lower() in ("1", "true", "yes")
     
     def save(self, output_path: Optional[Path] = None) -> Path:
         """Generate and save knowledge base to file."""
