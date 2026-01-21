@@ -45,9 +45,21 @@ CONSTRAINTS:
 - Maximum {max_lines} lines net change (additions - deletions)
 
 OUTPUT FORMAT (STRICT):
-- Output ONLY a unified diff patch.
-- NO explanations, NO markdown fences, NO commentary.
-- Start immediately with:  --- a/...
+- Output ONLY a valid unified diff patch that `git apply` can parse.
+- Use REAL line numbers in hunk headers: @@ -10,5 +10,8 @@ NOT @@ ... @@
+- Include sufficient context lines (at least 3 before and after changes).
+- NO explanations, NO markdown fences, NO commentary, NO placeholders.
+- Start immediately with:  --- a/path/to/file.ext
+
+EXAMPLE of correct format:
+--- a/app/src/example.ts
++++ b/app/src/example.ts
+@@ -15,7 +15,9 @@ export function example() {{
+   const x = 1;
+   const y = 2;
++  const z = 3;
+   return x + y;
+ }}
 
 Begin now:
 """
@@ -102,9 +114,21 @@ CONSTRAINTS:
 - Maximum {max_lines} lines net change (additions - deletions)
 
 OUTPUT FORMAT (STRICT):
-- Output ONLY a unified diff patch.
-- NO explanations, NO markdown fences, NO commentary.
-- Start immediately with:  --- a/...
+- Output ONLY a valid unified diff patch that `git apply` can parse.
+- Use REAL line numbers in hunk headers: @@ -10,5 +10,8 @@ NOT @@ ... @@
+- Include sufficient context lines (at least 3 before and after changes).
+- NO explanations, NO markdown fences, NO commentary, NO placeholders.
+- Start immediately with:  --- a/path/to/file.ext
+
+EXAMPLE of correct format:
+--- a/app/src/example.ts
++++ b/app/src/example.ts
+@@ -15,7 +15,9 @@ export function example() {{
+   const x = 1;
+   const y = 2;
++  const z = 3;
+   return x + y;
+ }}
 
 Begin now:
 """

@@ -178,6 +178,18 @@ class Runner:
 
         clean_patch = "\n".join(lines[diff_start:])
 
+        # Validate patch format: check for placeholder hunk headers like @@ ... @@
+        import re
+        hunk_header_pattern = re.compile(r'^@@\s+.*\s+@@', re.MULTILINE)
+        placeholder_pattern = re.compile(r'^@@\s+\.\.\..*@@', re.MULTILINE)
+        
+        if placeholder_pattern.search(clean_patch):
+            return False, "Patch contains placeholder hunk headers (@@ ... @@). LLM must provide REAL line numbers like @@ -10,5 +10,8 @@"
+        
+        # Check if patch has any hunk headers at all
+        if not hunk_header_pattern.search(clean_patch):
+            return False, "Patch is missing hunk headers. Must include line numbers like @@ -10,5 +10,8 @@"
+
         with tempfile.NamedTemporaryFile(mode="w", suffix=".patch", delete=False) as f:
             f.write(clean_patch)
             patch_path = f.name
