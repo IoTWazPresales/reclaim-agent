@@ -453,9 +453,11 @@ See diff for details.
         try:
             if self.repo_path and milestone.get("target_files"):
                 snippets: List[str] = []
-                max_files = 10  # Increased from 5
-                max_chars_per_file = 4000  # Increased from 2000
+                max_files = 8  # Balance between coverage and token limits
+                max_chars_per_file = 20000  # Large files need more context (was 2000, then 4000)
+                max_total_chars = 80000  # Total context cap across all files (~200K tokens)
                 matched = 0
+                total_chars = 0
                 
                 # Collect all candidate files first
                 all_candidates: List[str] = []
@@ -494,15 +496,23 @@ See diff for details.
                 
                 # Read top priority files
                 for rel_path in all_candidates[:max_files]:
+                    if total_chars >= max_total_chars:
+                        break
                     file_path = (self.repo_path / rel_path)
                     if not file_path.is_file():
                         continue
                     try:
                         text = file_path.read_text(encoding="utf-8")
-                        snippet = text[:max_chars_per_file]
+                        # Take up to max_chars_per_file, but respect total budget
+                        remaining_budget = max_total_chars - total_chars
+                        chars_to_take = min(max_chars_per_file, remaining_budget, len(text))
+                        snippet = text[:chars_to_take]
+                        if chars_to_take < len(text):
+                            snippet += f"\n... [file truncated, {len(text) - chars_to_take} more chars]"
                         snippets.append(f"--- FILE: {rel_path} ---\n{snippet}\n")
                         matched += 1
-                        if matched >= max_files:
+                        total_chars += chars_to_take
+                        if matched >= max_files or total_chars >= max_total_chars:
                             break
                     except Exception:
                         continue
