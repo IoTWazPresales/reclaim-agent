@@ -190,9 +190,30 @@ app/
             # Group by subdirectory
             component_groups = defaultdict(list)
             for comp in self._analyze_directory(components_path, "Component"):
-                rel_path = Path(comp['path']).relative_to(components_path)
-                group = rel_path.parts[0] if len(rel_path.parts) > 1 else "root"
-                component_groups[group].append(comp)
+                try:
+                    comp_path_str = comp['path']
+                    # Extract group from path string (more reliable than Path operations)
+                    # Path format: app/src/components/<group>/<file> or app/src/components/<file>
+                    if '/' in comp_path_str:
+                        parts = comp_path_str.split('/')
+                        # Find 'components' index
+                        comp_idx = None
+                        for i, part in enumerate(parts):
+                            if part == 'components' and i + 1 < len(parts):
+                                comp_idx = i + 1
+                                break
+                        if comp_idx is not None and comp_idx < len(parts) - 1:
+                            # There's a subdirectory after components
+                            group = parts[comp_idx]
+                        else:
+                            group = "root"
+                    else:
+                        group = "root"
+                    component_groups[group].append(comp)
+                except Exception as e:
+                    # Debug logging (if needed, can add debug flag later)
+                    pass
+                    component_groups["root"].append(comp)
             
             for group, comps in sorted(component_groups.items()):
                 if group != "root":
@@ -287,25 +308,37 @@ app/
         except Exception:
             return None
         
-        # Ensure both paths are absolute for relative_to() to work
-        abs_file_path = file_path.resolve() if not file_path.is_absolute() else file_path
-        abs_repo_path = self.repo_path.resolve() if not self.repo_path.is_absolute() else self.repo_path
-        
+        # Calculate relative path from repo root
         try:
-            rel_path = abs_file_path.relative_to(abs_repo_path)
-        except ValueError:
-            # If relative_to fails, try to construct relative path manually
+            # Ensure both paths are absolute for relative_to() to work
+            abs_file_path = file_path.resolve() if file_path.exists() else file_path
+            if not abs_file_path.is_absolute():
+                # If not absolute, make it relative to repo_path
+                abs_file_path = (self.repo_path / abs_file_path).resolve()
+            
+            abs_repo_path = self.repo_path.resolve()
+            
+            # Try relative_to
             try:
-                # Try using os.path.relpath as fallback
+                rel_path = abs_file_path.relative_to(abs_repo_path)
+            except ValueError:
+                # If relative_to fails, use os.path.relpath as fallback
                 import os
                 rel_path_str = os.path.relpath(str(abs_file_path), str(abs_repo_path))
                 rel_path = Path(rel_path_str)
-            except Exception:
-                # Last resort: use file_path as-is if it looks relative
-                if str(file_path).startswith("app/"):
-                    rel_path = Path(file_path)
-                else:
-                    return None
+        except Exception as e:
+            # Last resort: extract relative path from string representation
+            file_str = str(file_path)
+            # If it contains 'app/src/', extract everything after that
+            if 'app/src/' in file_str:
+                idx = file_str.find('app/src/')
+                rel_path = Path(file_str[idx:])
+            elif file_str.startswith('app/'):
+                rel_path = Path(file_str)
+            else:
+                # Can't determine relative path, skip this file
+                # Debug logging would go here if needed
+                return None
         
         item = {
             'name': file_path.stem,
