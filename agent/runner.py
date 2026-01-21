@@ -240,7 +240,22 @@ class Runner:
                 label="git apply --check",
             )
             if check.returncode != 0:
-                return False, f"Patch check failed: {check.stderr}"
+                # Extract line number from error if present (e.g., "error: corrupt patch at line 20")
+                error_msg = check.stderr or ""
+                # Try to show the problematic line for better debugging
+                line_match = None
+                import re
+                line_num_match = re.search(r"line (\d+)", error_msg)
+                if line_num_match:
+                    try:
+                        line_num = int(line_num_match.group(1))
+                        patch_lines = clean_patch.split("\n")
+                        if 0 < line_num <= len(patch_lines):
+                            problematic_line = patch_lines[line_num - 1]
+                            error_msg = f"{error_msg}\nProblematic line {line_num}: {problematic_line[:200]}"
+                    except (ValueError, IndexError):
+                        pass
+                return False, f"Patch check failed: {error_msg}"
 
             apply = self._run_cmd(
                 ["git", "apply", patch_path],
@@ -335,6 +350,12 @@ class Runner:
         if not patch:
             print("Failed to generate patch (empty response in fix mode)")
             self._fail("OpenAI returned empty patch in fix mode")
+            return None
+
+        # Check for NO_PATCH escape hatch
+        if patch.strip() == "NO_PATCH":
+            print("Model declined to generate patch (NO_PATCH response)")
+            self._fail("Model unable to safely generate a patch for this fix")
             return None
 
         branch_name = f"agent/{datetime.now().strftime('%Y%m%d')}-fix-truth-checks"
@@ -497,6 +518,18 @@ See diff for details.
             self._fail("OpenAI returned empty patch in milestone mode")
             return None
 
+        # Check for NO_PATCH escape hatch
+        if patch.strip() == "NO_PATCH":
+            print("Model declined to generate patch (NO_PATCH response)")
+            update_milestone_status(
+                self.config.milestones,
+                milestone_id,
+                "blocked",
+                "Model unable to safely generate a patch - insufficient context or unclear requirements"
+            )
+            self.config.save()
+            return None
+
         branch_slug = milestone_id.replace("_", "-")
         branch_name = f"agent/{datetime.now().strftime('%Y%m%d')}-{branch_slug}"
 
@@ -513,6 +546,52 @@ See diff for details.
             self.config.save()
             self._fail(f"Failed to prepare branch {branch_name} in milestone mode")
             return None
+
+        # Validate that patch touches at least one target file (if target_files are specified)
+        if milestone.get("target_files"):
+            import re
+            # Extract all file paths from the patch
+            patch_file_paths = set()
+            for line in patch.split("\n"):
+                if line.startswith("--- ") or line.startswith("+++ "):
+                    # Extract path: --- a/path or +++ b/path or --- /dev/null or --- path
+                    path_part = line[4:].strip()
+                    # Normalize: remove a/ or b/ prefix, handle /dev/null
+                    if path_part.startswith("a/"):
+                        path_part = path_part[2:]
+                    elif path_part.startswith("b/"):
+                        path_part = path_part[2:]
+                    if path_part != "/dev/null":
+                        patch_file_paths.add(path_part)
+
+            # Get all allowed target files
+            allowed_files = set()
+            for pattern in milestone["target_files"]:
+                result = self._run_cmd(
+                    ["git", "ls-files", pattern],
+                    cwd=self.repo_path,
+                    timeout=60,
+                    label=f"git ls-files validation {pattern}",
+                )
+                if result.returncode == 0:
+                    for rel_path in (result.stdout or "").splitlines():
+                        if rel_path.strip():
+                            allowed_files.add(rel_path.strip())
+
+            # Check if any patch file matches allowed files
+            if patch_file_paths and allowed_files:
+                matches = patch_file_paths.intersection(allowed_files)
+                if not matches:
+                    # None of the files in the patch are in the allowed target_files
+                    update_milestone_status(
+                        self.config.milestones,
+                        milestone_id,
+                        "blocked",
+                        f"Patch touches files outside target_files: {list(patch_file_paths)[:3]}. Must only modify files matching {milestone['target_files']}"
+                    )
+                    self.config.save()
+                    self._fail(f"Patch does not touch any allowed target files")
+                    return None
 
         success, error = self.apply_patch(patch, self.repo_path)
         if not success:

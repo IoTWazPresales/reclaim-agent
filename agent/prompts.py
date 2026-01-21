@@ -51,14 +51,24 @@ OUTPUT FORMAT (STRICT):
 - NO explanations, NO markdown fences, NO commentary, NO placeholders.
 - Start immediately with:  --- a/path/to/file.ext
 
+CRITICAL FILE PATH RULES:
+- You MUST use REAL file paths from the repository.
+- NEVER use placeholder names like "placeholder", "dummy", "example", "test.ts"
+- All file paths must be relative to the repository root (e.g., app/src/...)
+
+IF YOU CANNOT SAFELY GENERATE A REAL PATCH:
+- If the task is unclear, context is insufficient, or you cannot determine real file paths,
+- Output exactly: NO_PATCH
+- Do NOT output a placeholder or fake diff.
+
 EXAMPLE of correct format:
 --- a/app/src/example.ts
 +++ b/app/src/example.ts
 @@ -15,7 +15,9 @@ export function example() {{
-   const x = 1;
-   const y = 2;
+  const x = 1;
+  const y = 2;
 +  const z = 3;
-   return x + y;
+  return x + y;
  }}
 
 Begin now:
@@ -120,14 +130,25 @@ OUTPUT FORMAT (STRICT):
 - NO explanations, NO markdown fences, NO commentary, NO placeholders.
 - Start immediately with:  --- a/path/to/file.ext
 
+CRITICAL FILE PATH RULES:
+- You MUST use REAL file paths from the TARGET FILES list above.
+- NEVER use placeholder names like "placeholder", "dummy", "example", "test.ts"
+- If creating a new file, use a path that matches the TARGET FILES patterns
+- All file paths must be relative to the repository root (e.g., app/src/lib/training/...)
+
+IF YOU CANNOT SAFELY GENERATE A REAL PATCH:
+- If the task is unclear, context is insufficient, or you cannot determine real file paths,
+- Output exactly: NO_PATCH
+- Do NOT output a placeholder or fake diff.
+
 EXAMPLE of correct format:
 --- a/app/src/example.ts
 +++ b/app/src/example.ts
 @@ -15,7 +15,9 @@ export function example() {{
-   const x = 1;
-   const y = 2;
+  const x = 1;
+  const y = 2;
 +  const z = 3;
-   return x + y;
+  return x + y;
  }}
 
 Begin now:
@@ -206,15 +227,17 @@ def _extract_text_from_responses_api(payload: dict) -> str:
 
 def _sanitize_to_unified_diff(text: str) -> str:
     """
-    Ensure we return only the unified diff part starting at the first '--- a/' line.
+    Ensure we return only the unified diff part starting at the first '---' line.
+    Handles both '--- a/path' and '--- /dev/null' (for new files).
     If not found, return the original (caller will treat empty/invalid appropriately).
     """
     if not text:
         return ""
 
-    idx = text.find("--- a/")
+    # Look for unified diff start: --- a/... or --- /dev/null or just ---
+    idx = text.find("--- ")
     if idx == -1:
-        # Some diffs may start with '---' then '+++', but we insist on '--- a/' for safety.
+        # Try alternative patterns
         idx = text.find("---\n+++")
         if idx == -1:
             return text.strip()

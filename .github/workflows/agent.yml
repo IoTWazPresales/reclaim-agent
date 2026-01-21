@@ -56,10 +56,13 @@ jobs:
           AGENT_STRICT: "1"
           PYTHONUNBUFFERED: "1"
 
-          # Use GPT-5.2 Codex for best code generation results
-          OPENAI_MODEL: gpt-5.2-codex
+          # Use GPT-5.1 for reliable code generation (as per OpenAI cookbook)
+          OPENAI_MODEL: gpt-5.1
           OPENAI_READ_TIMEOUT_S: "300"
           OPENAI_MAX_OUTPUT_TOKENS: "16000"
           OPENAI_MAX_OUTPUT_TOKENS_CAP: "32000"
+          # Lower temperature for more deterministic, instruction-following behavior
+          OPENAI_ENABLE_TEMPERATURE: "1"
+          OPENAI_TEMPERATURE: "0.2"
         run: |
           python -m agent.run
