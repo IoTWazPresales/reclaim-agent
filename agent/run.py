@@ -62,7 +62,8 @@ def main():
                 config,
                 github,
                 runs_attempted=1,
-                prs_created=prs_today
+                prs_created=prs_today,
+                failing_checks=runner.run_truth_checks(),
             )
         
         sys.exit(0)

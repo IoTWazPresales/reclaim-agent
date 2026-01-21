@@ -62,6 +62,16 @@ def build_milestone_prompt(
 ) -> str:
     acceptance = "\n".join([f"- {cmd}" for cmd in milestone.get("acceptance", [])])
 
+    # Optional rich spec block if present in milestone config
+    spec_block = ""
+    spec = milestone.get("spec")
+    if spec:
+        try:
+            spec_text = json.dumps(spec, indent=2, ensure_ascii=False)
+        except Exception:
+            spec_text = str(spec)
+        spec_block = f"\n\nDETAILED SPEC (authoritative for behavior, UX, and constraints):\n{spec_text}\n"
+
     target_files = milestone.get("target_files", [])
     files_context = ""
     if target_files:
@@ -71,7 +81,7 @@ def build_milestone_prompt(
         )
 
     if current_files:
-        files_context += f"\n\nCURRENT FILE CONTENTS (if relevant):\n{current_files}"
+        files_context += f"\n\nCURRENT FILE CONTENTS (relevant snippets only):\n{current_files}"
 
     rules_text = "\n".join([f"- {rule}" for rule in repo_rules])
 
@@ -85,7 +95,7 @@ Title: {milestone['title']}
 Type: {milestone.get('type', 'feat')}
 Acceptance commands (all must pass):
 {acceptance}
-{files_context}
+{spec_block}{files_context}
 
 CONSTRAINTS:
 - Maximum {max_files} files changed

@@ -6,6 +6,10 @@ on:
     # Run every 2 hours from 06:00 to 16:00 UTC (08:00 to 18:00 SAST) Mon-Fri
     - cron: '0 6,8,10,12,14,16 * * 1-5'
 
+concurrency:
+  group: reclaim-agent
+  cancel-in-progress: false
+
 jobs:
   agent:
     runs-on: ubuntu-latest
@@ -33,6 +37,12 @@ jobs:
           path: reclaim-repo
           ref: ${{ vars.RECLAIM_DEFAULT_BRANCH }}
 
+      - name: Configure git identity for agent
+        working-directory: reclaim-repo
+        run: |
+          git config user.name "reclaim-agent-bot"
+          git config user.email "reclaim-agent-bot@users.noreply.github.com"
+
       - name: Run agent
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
@@ -46,7 +56,8 @@ jobs:
           AGENT_STRICT: "1"
           PYTHONUNBUFFERED: "1"
 
-          OPENAI_MODEL: gpt-5.2-codex
+          # Use a stable, supported default model; can be overridden via repo/Org settings
+          OPENAI_MODEL: gpt-4.1
           OPENAI_READ_TIMEOUT_S: "300"
           OPENAI_MAX_OUTPUT_TOKENS: "8000"
           OPENAI_MAX_OUTPUT_TOKENS_CAP: "20000"

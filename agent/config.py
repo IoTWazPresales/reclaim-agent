@@ -26,9 +26,10 @@ class Config:
         
         default_config = self._load_yaml(default_config_path)
         reclaim_config = self._load_yaml(reclaim_config_path)
-        
-        # Merge configs (reclaim overrides default)
-        self.config = {**default_config, **reclaim_config}
+
+        # Merge configs (reclaim overrides default) with a shallow dict + nested dict merge.
+        # Lists (e.g. truth_checks, repo_rules) are taken from reclaim_config when present.
+        self.config = self._merge_configs(default_config, reclaim_config)
         self.truth_checks = self.config.get("truth_checks", [])
         self.milestones = self.config.get("milestones") or []
         self.repo_rules = self.config.get("repo_rules", [])
@@ -43,7 +44,28 @@ class Config:
             return {}
         with open(path, "r", encoding="utf-8") as f:
             return yaml.safe_load(f) or {}
-    
+
+    @staticmethod
+    def _merge_configs(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Merge two config dicts where `override` wins.
+
+        - For plain keys, override value replaces base.
+        - For nested dicts, merge recursively.
+        - For lists/scalars, override value replaces base.
+        """
+        result: Dict[str, Any] = dict(base or {})
+        for key, val in (override or {}).items():
+            if (
+                key in result
+                and isinstance(result[key], dict)
+                and isinstance(val, dict)
+            ):
+                result[key] = Config._merge_configs(result[key], val)
+            else:
+                result[key] = val
+        return result
+
     def get_milestone_by_id(self, milestone_id: str) -> Optional[Dict[str, Any]]:
         """Get milestone by ID."""
         for milestone in self.milestones:

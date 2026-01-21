@@ -13,18 +13,14 @@ def generate_daily_summary(
     github: GitHubAPI,
     runs_attempted: int,
     prs_created: List[str],
-    date: Optional[str] = None
+    failing_checks: List[Dict[str, Any]],
+    date: Optional[str] = None,
 ) -> None:
     """Generate and post daily summary issue."""
     if not date:
         date = datetime.now().strftime("%Y-%m-%d")
     
     title = f"Agent Daily Summary ({date})"
-    
-    # Run truth checks for health status
-    from .runner import Runner
-    runner = Runner(config)
-    failing_checks = runner.run_truth_checks()
     health = "🔴 RED" if failing_checks else "🟢 GREEN"
     
     # Get milestone statuses

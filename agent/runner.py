@@ -211,6 +211,48 @@ class Runner:
     # -------------------------
     # Modes
     # -------------------------
+    def _branch_exists(self, branch_name: str) -> bool:
+        """Check if a local git branch already exists."""
+        if not self.repo_path:
+            return False
+        result = self._run_cmd(
+            ["git", "rev-parse", "--verify", branch_name],
+            cwd=self.repo_path,
+            timeout=30,
+            label="git rev-parse branch-exists",
+        )
+        return result.returncode == 0
+
+    def _ensure_branch_checked_out(self, branch_name: str, base_branch: str) -> bool:
+        """
+        Ensure a working branch exists and is checked out.
+
+        - Reuse existing branch if present.
+        - Otherwise create it from base_branch and check it out.
+        """
+        if not self.repo_path:
+            return False
+
+        if self._branch_exists(branch_name):
+            # Reuse existing branch locally
+            result = self._run_cmd(
+                ["git", "checkout", branch_name],
+                cwd=self.repo_path,
+                timeout=60,
+                label="git checkout existing",
+            )
+            return result.returncode == 0
+
+        # Create branch in remote (idempotent: create_branch tolerates 422)
+        self.github.create_branch(branch_name, base_branch)
+        result = self._run_cmd(
+            ["git", "checkout", "-b", branch_name],
+            cwd=self.repo_path,
+            timeout=60,
+            label="git checkout -b",
+        )
+        return result.returncode == 0
+
     def run_fix_mode(self) -> Optional[str]:
         """Run in fix mode - fix failing truth checks."""
         print("Running truth checks...")
@@ -246,9 +288,16 @@ class Runner:
             return None
 
         branch_name = f"agent/{datetime.now().strftime('%Y%m%d')}-fix-truth-checks"
-        self.github.create_branch(branch_name, self.config.default_branch)
 
-        self._run_cmd(["git", "checkout", "-b", branch_name], cwd=self.repo_path, timeout=60, label="git checkout -b")
+        # Idempotency: if a PR already exists for this branch, do not create a new one.
+        existing_pr = self.github.get_pr_by_branch(branch_name)
+        if existing_pr:
+            print(f"Existing PR for fix branch found, skipping new run: {existing_pr['html_url']}")
+            return existing_pr.get("html_url")
+
+        if not self._ensure_branch_checked_out(branch_name, self.config.default_branch):
+            self._fail(f"Failed to prepare branch {branch_name} for fix mode")
+            return None
 
         success, error = self.apply_patch(patch, self.repo_path)
         if not success:
@@ -258,6 +307,9 @@ class Runner:
         print("Verifying fixes...")
         still_failing = self.run_truth_checks()
         if still_failing:
+            print("Truth checks still failing after fix patch:")
+            for check in still_failing:
+                print(f"- {check.get('name')}: {check.get('error')}")
             self._fail("Truth checks still failing after fix patch")
             return None
 
@@ -308,14 +360,70 @@ See diff for details.
         milestone_id = milestone["id"]
         print(f"Processing milestone: {milestone['title']} ({milestone_id})")
 
+        # Track attempts and stop after configured max_attempts to avoid infinite retries.
+        attempts = int(milestone.get("attempts", 0)) + 1
+        milestone["attempts"] = attempts
+        if attempts > self.config.max_attempts:
+            update_milestone_status(
+                self.config.milestones,
+                milestone_id,
+                "blocked",
+                f"Exceeded max_attempts ({self.config.max_attempts})",
+            )
+            self.config.save()
+            print(f"Milestone {milestone_id} blocked due to exceeding max attempts")
+            return None
+
         update_milestone_status(self.config.milestones, milestone_id, "in_progress")
         self.config.save()
+
+        # Optionally gather a small amount of file context for the LLM based on target_files.
+        current_files_snippet: Optional[str] = None
+        try:
+            if self.repo_path and milestone.get("target_files"):
+                snippets: List[str] = []
+                max_files = 5
+                max_chars_per_file = 2000
+                matched = 0
+                for pattern in milestone["target_files"]:
+                    # Use git ls-files for globbing inside the repo to respect .gitignore.
+                    result = self._run_cmd(
+                        ["git", "ls-files", pattern],
+                        cwd=self.repo_path,
+                        timeout=60,
+                        label=f"git ls-files {pattern}",
+                    )
+                    if result.returncode != 0:
+                        continue
+                    for rel_path in (result.stdout or "").splitlines():
+                        if not rel_path.strip():
+                            continue
+                        file_path = (self.repo_path / rel_path.strip())
+                        if not file_path.is_file():
+                            continue
+                        try:
+                            text = file_path.read_text(encoding="utf-8")
+                        except Exception:
+                            continue
+                        snippet = text[:max_chars_per_file]
+                        snippets.append(f"--- FILE: {rel_path.strip()} ---\n{snippet}\n")
+                        matched += 1
+                        if matched >= max_files:
+                            break
+                    if matched >= max_files:
+                        break
+                if snippets:
+                    current_files_snippet = "\n".join(snippets)
+        except Exception:
+            # Context gathering should never break the run.
+            current_files_snippet = None
 
         prompt = build_milestone_prompt(
             milestone,
             self.config.repo_rules,
             self.config.max_files,
             self.config.max_lines,
+            current_files=current_files_snippet,
         )
 
         print("Calling OpenAI API for milestone patch...")
@@ -341,9 +449,20 @@ See diff for details.
 
         branch_slug = milestone_id.replace("_", "-")
         branch_name = f"agent/{datetime.now().strftime('%Y%m%d')}-{branch_slug}"
-        self.github.create_branch(branch_name, self.config.default_branch)
 
-        self._run_cmd(["git", "checkout", "-b", branch_name], cwd=self.repo_path, timeout=60, label="git checkout -b")
+        # Idempotency: if a PR already exists for this milestone branch, do not recreate it.
+        existing_pr = self.github.get_pr_by_branch(branch_name)
+        if existing_pr:
+            print(f"Existing PR for milestone found, marking as done: {existing_pr['html_url']}")
+            update_milestone_status(self.config.milestones, milestone_id, "done")
+            self.config.save()
+            return existing_pr.get("html_url")
+
+        if not self._ensure_branch_checked_out(branch_name, self.config.default_branch):
+            update_milestone_status(self.config.milestones, milestone_id, "blocked", f"Failed to prepare branch {branch_name}")
+            self.config.save()
+            self._fail(f"Failed to prepare branch {branch_name} in milestone mode")
+            return None
 
         success, error = self.apply_patch(patch, self.repo_path)
         if not success:
@@ -353,11 +472,13 @@ See diff for details.
             return None
 
         print("Verifying acceptance criteria...")
-        app_path = self.repo_path / "app"
+        # Acceptance commands are assumed relative to repo root; they can do their own `cd`.
+        app_path = self.repo_path
         for cmd in milestone.get("acceptance", []):
             result = self._run_cmd(cmd, cwd=app_path, timeout=300, label=f"acceptance: {cmd}")
             if result.returncode != 0:
-                update_milestone_status(self.config.milestones, milestone_id, "blocked", f"Acceptance failed: {cmd}")
+                reason = f"Acceptance failed: {cmd}\nSTDOUT:\n{(result.stdout or '')[:500]}\nSTDERR:\n{(result.stderr or '')[:500]}"
+                update_milestone_status(self.config.milestones, milestone_id, "blocked", reason)
                 self.config.save()
                 self._fail("Acceptance criteria not met in milestone mode")
                 return None
