@@ -105,7 +105,11 @@ def build_milestone_prompt(
         )
 
     if current_files:
-        files_context += f"\n\nCURRENT FILE CONTENTS (relevant snippets only):\n{current_files}"
+        files_context += f"\n\nREPOSITORY CONTEXT (comprehensive information about the codebase):\n{current_files}\n\n"
+        files_context += "IMPORTANT: Use the REPOSITORY STRUCTURE above to understand the actual file paths. "
+        files_context += "Use ALL FILES MATCHING TARGET PATTERNS to see what files exist. "
+        files_context += "Use FILE CONTENTS to understand the code patterns and structure. "
+        files_context += "Use KEY CONFIGURATION FILES to understand project settings and dependencies."
 
     rules_text = "\n".join([f"- {rule}" for rule in repo_rules])
 

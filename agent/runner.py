@@ -448,83 +448,184 @@ See diff for details.
         update_milestone_status(self.config.milestones, milestone_id, "in_progress")
         self.config.save()
 
-        # Gather file context for the LLM - prioritize most relevant files
+        # Gather comprehensive context for the LLM
         current_files_snippet: Optional[str] = None
         try:
-            if self.repo_path and milestone.get("target_files"):
-                snippets: List[str] = []
-                max_files = 8  # Balance between coverage and token limits
-                max_chars_per_file = 20000  # Large files need more context (was 2000, then 4000)
-                max_total_chars = 80000  # Total context cap across all files (~200K tokens)
-                matched = 0
-                total_chars = 0
+            if self.repo_path:
+                context_parts: List[str] = []
                 
-                # Collect all candidate files first
-                all_candidates: List[str] = []
-                for pattern in milestone["target_files"]:
-                    result = self._run_cmd(
-                        ["git", "ls-files", pattern],
-                        cwd=self.repo_path,
-                        timeout=60,
-                        label=f"git ls-files {pattern}",
-                    )
-                    if result.returncode == 0:
-                        for rel_path in (result.stdout or "").splitlines():
-                            if rel_path.strip():
-                                all_candidates.append(rel_path.strip())
+                # 1. Get directory structure overview for target areas
+                if milestone.get("target_files"):
+                    structure_parts: List[str] = []
+                    all_files_for_structure: List[str] = []
+                    
+                    # First, collect all files matching patterns
+                    for pattern in milestone["target_files"]:
+                        result = self._run_cmd(
+                            ["git", "ls-files", pattern],
+                            cwd=self.repo_path,
+                            timeout=60,
+                            label=f"git ls-files structure {pattern}",
+                        )
+                        if result.returncode == 0:
+                            for rel_path in (result.stdout or "").splitlines():
+                                if rel_path.strip():
+                                    all_files_for_structure.append(rel_path.strip())
+                    
+                    if all_files_for_structure:
+                        # Build a tree structure from file paths
+                        dirs_seen = set()
+                        files_by_dir: Dict[str, List[str]] = {}
+                        
+                        for file_path in all_files_for_structure:
+                            parts = file_path.split("/")
+                            filename = parts[-1]
+                            dir_path = "/".join(parts[:-1]) if len(parts) > 1 else ""
+                            
+                            # Track all parent directories
+                            for i in range(1, len(parts)):
+                                parent_dir = "/".join(parts[:i])
+                                dirs_seen.add(parent_dir)
+                            
+                            # Group files by directory
+                            if dir_path not in files_by_dir:
+                                files_by_dir[dir_path] = []
+                            files_by_dir[dir_path].append(filename)
+                        
+                        # Build tree output
+                        structure_parts.append("REPOSITORY STRUCTURE (target areas):")
+                        # Show root-level files first
+                        if "" in files_by_dir:
+                            structure_parts.append("  [root]/")
+                            for f in sorted(files_by_dir[""])[:20]:
+                                structure_parts.append(f"    {f}")
+                        
+                        # Then show directories in sorted order
+                        sorted_dirs = sorted([d for d in dirs_seen if d])
+                        for d in sorted_dirs[:30]:  # Limit to 30 directories
+                            depth = d.count("/")
+                            indent = "  " + ("  " * depth)
+                            structure_parts.append(f"{indent}{d.split('/')[-1]}/")
+                            # Show files in this directory
+                            if d in files_by_dir:
+                                for f in sorted(files_by_dir[d])[:15]:  # Max 15 files per dir
+                                    structure_parts.append(f"{indent}  {f}")
+                    
+                    if structure_parts:
+                        context_parts.append("\n".join(structure_parts))
                 
-                # Prioritize files that are most likely relevant based on milestone title
-                # Look for keywords in milestone title to prioritize
-                title_lower = milestone.get("title", "").lower()
-                priority_keywords = []
-                if "training" in title_lower:
-                    priority_keywords.extend(["training", "Training"])
-                if "screen" in title_lower or "ui" in title_lower or "panel" in title_lower:
-                    priority_keywords.extend(["Screen", "screen", "component", "Component"])
-                if "preview" in title_lower:
-                    priority_keywords.extend(["preview", "Preview"])
+                # 2. Get ALL files matching target patterns (full list, not just snippets)
+                all_matching_files: List[str] = []
+                if milestone.get("target_files"):
+                    for pattern in milestone["target_files"]:
+                        result = self._run_cmd(
+                            ["git", "ls-files", pattern],
+                            cwd=self.repo_path,
+                            timeout=60,
+                            label=f"git ls-files {pattern}",
+                        )
+                        if result.returncode == 0:
+                            for rel_path in (result.stdout or "").splitlines():
+                                if rel_path.strip():
+                                    all_matching_files.append(rel_path.strip())
                 
-                # Sort candidates: files with priority keywords first
-                def priority_score(path: str) -> int:
-                    score = 0
-                    for keyword in priority_keywords:
-                        if keyword in path:
-                            score += 10
-                    return score
+                if all_matching_files:
+                    context_parts.append(f"\nALL FILES MATCHING TARGET PATTERNS ({len(all_matching_files)} files):")
+                    for f in sorted(all_matching_files)[:200]:  # Limit to 200 files for context
+                        context_parts.append(f"  - {f}")
                 
-                all_candidates.sort(key=priority_score, reverse=True)
+                # 3. Include key config files if they exist
+                config_files = [
+                    "package.json",
+                    "tsconfig.json",
+                    "app/package.json",
+                    "app/tsconfig.json",
+                ]
+                config_content = []
+                for config_path in config_files:
+                    full_path = self.repo_path / config_path
+                    if full_path.exists() and full_path.is_file():
+                        try:
+                            content = full_path.read_text(encoding="utf-8")
+                            # Limit config file size to 5000 chars
+                            if len(content) > 5000:
+                                content = content[:5000] + "\n... [truncated]"
+                            config_content.append(f"--- CONFIG: {config_path} ---\n{content}\n")
+                        except Exception:
+                            pass
                 
-                # Read top priority files
-                for rel_path in all_candidates[:max_files]:
-                    if total_chars >= max_total_chars:
-                        break
-                    file_path = (self.repo_path / rel_path)
-                    if not file_path.is_file():
-                        continue
-                    try:
-                        text = file_path.read_text(encoding="utf-8")
-                        # Take up to max_chars_per_file, but respect total budget
-                        remaining_budget = max_total_chars - total_chars
-                        chars_to_take = min(max_chars_per_file, remaining_budget, len(text))
-                        snippet = text[:chars_to_take]
-                        if chars_to_take < len(text):
-                            snippet += f"\n... [file truncated, {len(text) - chars_to_take} more chars]"
-                        snippets.append(f"--- FILE: {rel_path} ---\n{snippet}\n")
-                        matched += 1
-                        total_chars += chars_to_take
-                        if matched >= max_files or total_chars >= max_total_chars:
+                if config_content:
+                    context_parts.append("\nKEY CONFIGURATION FILES:\n" + "\n".join(config_content))
+                
+                # 4. Gather file content snippets (prioritized)
+                if milestone.get("target_files") and all_matching_files:
+                    snippets: List[str] = []
+                    max_files = 10  # Increased from 8
+                    max_chars_per_file = 25000  # Increased from 20000
+                    max_total_chars = 120000  # Increased from 80000 (~300K tokens)
+                    matched = 0
+                    total_chars = 0
+                    
+                    # Prioritize files that are most likely relevant based on milestone title
+                    title_lower = milestone.get("title", "").lower()
+                    priority_keywords = []
+                    if "training" in title_lower:
+                        priority_keywords.extend(["training", "Training"])
+                    if "screen" in title_lower or "ui" in title_lower or "panel" in title_lower:
+                        priority_keywords.extend(["Screen", "screen", "component", "Component"])
+                    if "preview" in title_lower:
+                        priority_keywords.extend(["preview", "Preview"])
+                    
+                    # Sort candidates: files with priority keywords first
+                    def priority_score(path: str) -> int:
+                        score = 0
+                        for keyword in priority_keywords:
+                            if keyword in path:
+                                score += 10
+                        return score
+                    
+                    all_matching_files.sort(key=priority_score, reverse=True)
+                    
+                    # Read top priority files with full content when possible
+                    for rel_path in all_matching_files[:max_files]:
+                        if total_chars >= max_total_chars:
                             break
-                    except Exception:
-                        continue
+                        file_path = (self.repo_path / rel_path)
+                        if not file_path.is_file():
+                            continue
+                        try:
+                            text = file_path.read_text(encoding="utf-8")
+                            # Take up to max_chars_per_file, but respect total budget
+                            remaining_budget = max_total_chars - total_chars
+                            chars_to_take = min(max_chars_per_file, remaining_budget, len(text))
+                            snippet = text[:chars_to_take]
+                            
+                            # Add file metadata
+                            file_info = f"--- FILE: {rel_path} ({len(text)} total chars) ---\n"
+                            if chars_to_take < len(text):
+                                snippet += f"\n... [file truncated, {len(text) - chars_to_take} more chars remain]"
+                            
+                            snippets.append(file_info + snippet + "\n")
+                            matched += 1
+                            total_chars += chars_to_take
+                            if matched >= max_files or total_chars >= max_total_chars:
+                                break
+                        except Exception:
+                            continue
+                    
+                    if snippets:
+                        context_parts.append(f"\nFILE CONTENTS (top {len(snippets)} prioritized files):\n" + "\n".join(snippets))
                 
-                if snippets:
-                    current_files_snippet = "\n".join(snippets)
+                if context_parts:
+                    current_files_snippet = "\n\n".join(context_parts)
                     if self._debug_enabled():
-                        print(f"[AGENT_DEBUG] Gathered context from {len(snippets)} files")
+                        print(f"[AGENT_DEBUG] Gathered comprehensive context: {len(context_parts)} sections, ~{len(current_files_snippet)} chars")
         except Exception as e:
             # Context gathering should never break the run.
             if self._debug_enabled():
                 print(f"[AGENT_DEBUG] File context gathering failed: {e}")
+                import traceback
+                traceback.print_exc()
             current_files_snippet = None
 
         prompt = build_milestone_prompt(
