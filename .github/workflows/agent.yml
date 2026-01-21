@@ -56,8 +56,8 @@ jobs:
           AGENT_STRICT: "1"
           PYTHONUNBUFFERED: "1"
 
-          # Use the latest reasoning model for best code generation results
-          OPENAI_MODEL: o1-preview
+          # Use GPT-5.2 Codex for best code generation results
+          OPENAI_MODEL: gpt-5.2-codex
           OPENAI_READ_TIMEOUT_S: "300"
           OPENAI_MAX_OUTPUT_TOKENS: "16000"
           OPENAI_MAX_OUTPUT_TOKENS_CAP: "32000"
