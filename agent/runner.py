@@ -696,9 +696,16 @@ See diff for details.
                     context_parts.append("=== KNOWLEDGE BASE (Complete Codebase Understanding) ===")
                     context_parts.append(kb_content)
                     context_parts.append("=== END KNOWLEDGE BASE ===\n")
+                    
+                    # When KB is available, skip redundant structure gathering
+                    # KB already has: structure, file catalog, patterns, navigation
+                    # We only need: target files to modify
+                    skip_redundant_gathering = True
+                else:
+                    skip_redundant_gathering = False
                 
-                # 1. Get directory structure overview for target areas (simplified - KB has structure)
-                if milestone.get("target_files"):
+                # 1. Get directory structure overview (only if no KB - KB has this)
+                if not skip_redundant_gathering and milestone.get("target_files"):
                     structure_parts: List[str] = []
                     all_files_for_structure: List[str] = []
                     
@@ -757,7 +764,7 @@ See diff for details.
                     if structure_parts:
                         context_parts.append("\n".join(structure_parts))
                 
-                # 2. Get ALL files matching target patterns (full list, not just snippets)
+                # 2. Get target files list (simplified when KB available)
                 all_matching_files: List[str] = []
                 if milestone.get("target_files"):
                     for pattern in milestone["target_files"]:
@@ -772,41 +779,52 @@ See diff for details.
                                 if rel_path.strip():
                                     all_matching_files.append(rel_path.strip())
                 
-                if all_matching_files:
+                # Only show file list if no KB (KB has comprehensive file catalog)
+                if not skip_redundant_gathering and all_matching_files:
                     context_parts.append(f"\nALL FILES MATCHING TARGET PATTERNS ({len(all_matching_files)} files):")
                     for f in sorted(all_matching_files)[:200]:  # Limit to 200 files for context
                         context_parts.append(f"  - {f}")
                 
-                # 3. Include key config files if they exist
-                config_files = [
-                    "package.json",
-                    "tsconfig.json",
-                    "app/package.json",
-                    "app/tsconfig.json",
-                ]
-                config_content = []
-                for config_path in config_files:
-                    full_path = self.repo_path / config_path
-                    if full_path.exists() and full_path.is_file():
-                        try:
-                            content = full_path.read_text(encoding="utf-8")
-                            # Limit config file size to 5000 chars
-                            if len(content) > 5000:
-                                content = content[:5000] + "\n... [truncated]"
-                            config_content.append(f"--- CONFIG: {config_path} ---\n{content}\n")
-                        except Exception:
-                            pass
+                # 3. Include key config files (only if no KB - KB has config info)
+                if not skip_redundant_gathering:
+                    config_files = [
+                        "package.json",
+                        "tsconfig.json",
+                        "app/package.json",
+                        "app/tsconfig.json",
+                    ]
+                    config_content = []
+                    for config_path in config_files:
+                        full_path = self.repo_path / config_path
+                        if full_path.exists() and full_path.is_file():
+                            try:
+                                content = full_path.read_text(encoding="utf-8")
+                                # Limit config file size to 5000 chars
+                                if len(content) > 5000:
+                                    content = content[:5000] + "\n... [truncated]"
+                                config_content.append(f"--- CONFIG: {config_path} ---\n{content}\n")
+                            except Exception:
+                                pass
+                    
+                    if config_content:
+                        context_parts.append("\nKEY CONFIGURATION FILES:\n" + "\n".join(config_content))
                 
-                if config_content:
-                    context_parts.append("\nKEY CONFIGURATION FILES:\n" + "\n".join(config_content))
-                
-                # 4. Gather file content snippets (prioritized)
+                # 4. Gather file content for target files (ALWAYS needed - these are the files to modify)
+                # When KB is available, we can be more selective and focused
                 if milestone.get("target_files") and all_matching_files:
                     snippets: List[str] = []
-                    max_files_full = 3  # Top 3 files get FULL content (no truncation)
-                    max_files_total = 10  # Total files to include
-                    max_chars_per_file_truncated = 50000  # For files beyond top 3
-                    max_total_chars = 200000  # Increased total budget (~500K tokens)
+                    if skip_redundant_gathering:
+                        # With KB: focus on fewer, most relevant files
+                        max_files_full = 3  # Top 3 files get FULL content
+                        max_files_total = 5  # Only 5 files total (KB provides context)
+                        max_chars_per_file_truncated = 30000  # Smaller truncation limit
+                        max_total_chars = 100000  # Smaller total budget (~250K tokens)
+                    else:
+                        # Without KB: need more files for context
+                        max_files_full = 3  # Top 3 files get FULL content
+                        max_files_total = 10  # More files needed
+                        max_chars_per_file_truncated = 50000
+                        max_total_chars = 200000  # Larger budget (~500K tokens)
                     matched = 0
                     total_chars = 0
                     

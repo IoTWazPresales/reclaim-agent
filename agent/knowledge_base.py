@@ -213,9 +213,30 @@ app/
             # Group by subdirectory
             lib_groups = defaultdict(list)
             for module in self._analyze_directory(lib_path, "Module"):
-                rel_path = Path(module['path']).relative_to(lib_path)
-                group = rel_path.parts[0] if len(rel_path.parts) > 1 else "root"
-                lib_groups[group].append(module)
+                try:
+                    mod_path = Path(module['path'])
+                    if mod_path.is_absolute():
+                        rel_path = mod_path.relative_to(lib_path.resolve())
+                    else:
+                        # Path is already relative, extract first part
+                        rel_path = mod_path
+                    group = rel_path.parts[0] if len(rel_path.parts) > 1 else "root"
+                    lib_groups[group].append(module)
+                except (ValueError, AttributeError):
+                    # Fallback: extract group from path string
+                    path_str = module['path']
+                    if '/' in path_str:
+                        # Extract lib/<group>/... from app/src/lib/<group>/...
+                        parts = path_str.split('/')
+                        lib_idx = None
+                        for i, part in enumerate(parts):
+                            if part == 'lib' and i + 1 < len(parts):
+                                lib_idx = i + 1
+                                break
+                        group = parts[lib_idx] if lib_idx is not None else "root"
+                    else:
+                        group = "root"
+                    lib_groups[group].append(module)
             
             for group, modules in sorted(lib_groups.items()):
                 catalog_parts.append(f"#### {group.title()} Module\n")
@@ -266,7 +287,25 @@ app/
         except Exception:
             return None
         
-        rel_path = file_path.relative_to(self.repo_path)
+        # Ensure both paths are absolute for relative_to() to work
+        abs_file_path = file_path.resolve() if not file_path.is_absolute() else file_path
+        abs_repo_path = self.repo_path.resolve() if not self.repo_path.is_absolute() else self.repo_path
+        
+        try:
+            rel_path = abs_file_path.relative_to(abs_repo_path)
+        except ValueError:
+            # If relative_to fails, try to construct relative path manually
+            try:
+                # Try using os.path.relpath as fallback
+                import os
+                rel_path_str = os.path.relpath(str(abs_file_path), str(abs_repo_path))
+                rel_path = Path(rel_path_str)
+            except Exception:
+                # Last resort: use file_path as-is if it looks relative
+                if str(file_path).startswith("app/"):
+                    rel_path = Path(file_path)
+                else:
+                    return None
         
         item = {
             'name': file_path.stem,
