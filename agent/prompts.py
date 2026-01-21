@@ -121,6 +121,39 @@ def build_milestone_prompt(
 
     return f"""You are a code modification agent for the Reclaim repository. Complete the milestone below.
 
+⚠️ CRITICAL OUTPUT FORMAT - READ THIS FIRST ⚠️
+You MUST output complete file content, NOT unified diffs. The format is:
+
+===FILE_START: <file_path>===
+<complete file content here>
+===FILE_END: <file_path>===
+
+RULES:
+1. Output the COMPLETE modified file content for each file (not a diff!)
+2. For existing files: include the ENTIRE file with your changes
+3. For new files: include the COMPLETE new file content
+4. NO unified diff format (no --- a/... +++ b/... or @@ line numbers)
+5. NO hunk headers, NO line numbers, NO diff markers
+6. Just the complete file content between the markers
+7. You can output multiple files, one after another
+
+EXAMPLE (this is the ONLY format you should use):
+===FILE_START: app/src/example.ts===
+// Example file
+export function example() {{
+  const x = 1;
+  const y = 2;
+  const z = 3;
+  return x + y + z;
+}}
+===FILE_END: app/src/example.ts===
+
+DO NOT output unified diff format like:
+--- a/app/src/example.ts
++++ b/app/src/example.ts
+@@ -1,5 +1,6 @@
+... (this is WRONG and will be rejected)
+
 REPO RULES (CRITICAL - MUST FOLLOW):
 {rules_text}
 
@@ -135,18 +168,6 @@ CONSTRAINTS:
 - Maximum {max_files} files changed
 - Maximum {max_lines} lines net change (additions - deletions)
 
-OUTPUT FORMAT (NEW APPROACH - NO LINE NUMBERS NEEDED):
-- Output the COMPLETE modified file content for each file you need to change.
-- Format: For each file, output exactly:
-  ===FILE_START: <file_path>===
-  <complete file content>
-  ===FILE_END: <file_path>===
-- For new files, output the complete file content.
-- For existing files, output the COMPLETE file with your modifications included.
-- NO unified diffs, NO line numbers, NO hunk headers - just complete file content.
-- NO explanations, NO markdown fences, NO commentary between files.
-- You can output multiple files, one after another.
-
 CRITICAL FILE PATH RULES:
 - You MUST use REAL file paths from the TARGET FILES list above.
 - NEVER use placeholder names like "placeholder", "dummy", "example", "test.ts"
@@ -160,18 +181,8 @@ WHEN TO USE NO_PATCH (ONLY AS LAST RESORT):
 - You can create new files in paths matching TARGET FILES patterns if needed.
 - Only output NO_PATCH if you truly cannot proceed (e.g., missing critical dependencies, completely unclear requirements).
 
-EXAMPLE of correct format:
-===FILE_START: app/src/example.ts===
-// Example file
-export function example() {{
-  const x = 1;
-  const y = 2;
-  const z = 3;
-  return x + y + z;
-}}
-===FILE_END: app/src/example.ts===
-
-Begin now:
+REMEMBER: Output complete file content using ===FILE_START: path=== ... ===FILE_END: path=== format.
+DO NOT output unified diff format. Start now:
 """
 
 

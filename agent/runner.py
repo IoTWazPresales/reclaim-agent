@@ -173,8 +173,12 @@ class Runner:
         """
         import re
         
-        # Pattern to match file blocks
-        file_pattern = re.compile(r'===FILE_START:\s*(.+?)===\s*\n(.*?)\n===FILE_END:\s*\1===', re.DOTALL)
+        # Pattern to match file blocks - be flexible with whitespace and path matching
+        # Match FILE_START with path, then content, then FILE_END with same path (flexible whitespace)
+        file_pattern = re.compile(
+            r'===FILE_START:\s*(.+?)\s*===\s*\n(.*?)\n===FILE_END:\s*\1\s*===',
+            re.DOTALL | re.MULTILINE
+        )
         
         files_to_write = {}
         matches = list(file_pattern.finditer(content))
@@ -938,18 +942,33 @@ See diff for details.
                     return None
 
         # Try new file content format first (===FILE_START: path=== ... ===FILE_END: path===)
-        # If that fails, fall back to unified diff format
+        # If that fails, check if it's unified diff format and reject it with helpful error
         actual_patch = patch
         parse_success, parse_error, generated_diff = self._parse_file_content_format(patch, self.repo_path)
         if parse_success and generated_diff:
             print("Successfully parsed file content format, using generated diff")
             actual_patch = generated_diff
-        elif parse_error and "No file blocks found" in parse_error:
-            # Not in new format, treat as unified diff
-            print("Not in file content format, treating as unified diff")
         else:
-            # Parse error but might still be a unified diff, try both
-            print(f"File content format parse had issues: {parse_error}, trying unified diff format")
+            # Check if model output unified diff format (which we don't want)
+            if patch.strip().startswith("--- ") or "--- a/" in patch or "+++ b/" in patch:
+                error_msg = (
+                    "Model output unified diff format instead of file content format. "
+                    "The model must output complete file content using ===FILE_START: path=== ... ===FILE_END: path=== format. "
+                    "Unified diff format with line numbers is not supported and causes corrupt patch errors."
+                )
+                update_milestone_status(
+                    self.config.milestones,
+                    milestone_id,
+                    "blocked",
+                    error_msg
+                )
+                self.config.save()
+                self._fail(error_msg)
+                return None
+            
+            # Not in new format and not unified diff - might be some other issue
+            print(f"File content format parse failed: {parse_error}, checking if it's a different format...")
+            # Fall through to try unified diff as last resort (though it will likely fail)
 
         success, error = self.apply_patch(actual_patch, self.repo_path)
         if not success:
