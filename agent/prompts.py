@@ -143,6 +143,15 @@ RULES:
 6. Just the complete file content between the markers
 7. You can output multiple files, one after another
 
+🔒 CRITICAL: PRESERVE ALL EXISTING FUNCTIONALITY 🔒
+- When modifying existing files, you MUST preserve ALL existing exports, functions, types, and behavior
+- DO NOT remove or rename existing exports - other files depend on them
+- DO NOT change existing function signatures unless the milestone explicitly requires it
+- DO NOT replace entire files - only ADD new functionality or MODIFY specific parts
+- If a file has 1000 lines and you need to add 50 lines, output ALL 1050 lines (the original 1000 + your 50 additions)
+- Check the milestone spec for "scope_out" - it explicitly lists what NOT to change
+- The milestone says "No changes to training engine behavior" - this means preserve ALL existing engine functionality
+
 EXAMPLE (this is the ONLY format you should use):
 ===FILE_START: app/src/example.ts===
 // Example file
@@ -159,6 +168,13 @@ DO NOT output unified diff format like:
 +++ b/app/src/example.ts
 @@ -1,5 +1,6 @@
 ... (this is WRONG and will be rejected)
+
+⚠️ CRITICAL: CHECK MILESTONE SCOPE_OUT ⚠️
+- The milestone spec includes "scope_out" which lists what NOT to change
+- If scope_out says "No changes to training engine behavior", you MUST preserve ALL existing engine exports and functions
+- If scope_out says "No DB schema/migrations", do NOT modify database files
+- If scope_out says "No auth changes", do NOT modify authentication code
+- Always check scope_out before modifying any file - it's a hard constraint
 
 REPO RULES (CRITICAL - MUST FOLLOW):
 {rules_text}
@@ -341,7 +357,7 @@ def call_openai(prompt: str, api_key: str) -> Optional[str]:
         "input": [
             {
                 "role": "system",
-                "content": "You output ONLY unified diff patches. Start immediately with '--- a/...'. No explanations.",
+                "content": "You output complete file content using ===FILE_START: path=== ... ===FILE_END: path=== format. Preserve all existing functionality when modifying files.",
             },
             {"role": "user", "content": prompt},
         ],
