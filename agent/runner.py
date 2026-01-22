@@ -1067,6 +1067,14 @@ See diff for details.
             self._fail(f"Patch apply failed in milestone mode: {error}")
             return None
 
+        # Validate that patch actually addresses milestone requirements
+        validation_error = self._validate_milestone_patch(actual_patch, milestone)
+        if validation_error:
+            update_milestone_status(self.config.milestones, milestone_id, "blocked", validation_error)
+            self.config.save()
+            self._fail(f"Patch validation failed: {validation_error}")
+            return None
+
         print("Verifying acceptance criteria...")
         # Acceptance commands are assumed relative to repo root; they can do their own `cd`.
         app_path = self.repo_path
