@@ -121,6 +121,17 @@ def build_milestone_prompt(
 
     return f"""You are a code modification agent for the Reclaim repository. Complete the milestone below.
 
+🚨 CRITICAL: YOU MUST IMPLEMENT THE FEATURE DESCRIBED IN THE MILESTONE 🚨
+- The milestone spec describes WHAT TO BUILD - you must ADD new functionality
+- DO NOT output existing files unchanged - you must MODIFY or CREATE files with actual changes
+- The milestone requires you to IMPLEMENT features, not just verify existing code
+- If the milestone says "Add a preview panel", you MUST create/modify files to add that panel
+- If the milestone says "Compute preview via dry-run", you MUST add code that does that computation
+- Outputting an existing file unchanged (even with correct formatting) is NOT completing the milestone
+- You must ADD new code, new functions, new components, or new files as required by the milestone spec
+- Check the "scope_in" section - it lists what you MUST implement
+- Check the "implementation_approach" section - it tells you HOW to implement it
+
 📚 CONTEXT PROVIDED:
 - KNOWLEDGE BASE: Complete codebase understanding (architecture, structure, patterns, navigation)
 - TARGET FILES: Specific files you need to modify (full content provided)
