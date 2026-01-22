@@ -509,6 +509,91 @@ class Runner:
             except Exception:
                 pass
 
+    def _validate_milestone_patch(self, patch: str, milestone: Dict[str, Any]) -> Optional[str]:
+        """
+        Validate that the patch actually addresses the milestone requirements.
+        Returns error message if validation fails, None if valid.
+        """
+        import re
+        
+        # Extract file paths from patch
+        patch_file_paths = set()
+        for line in patch.split("\n"):
+            if line.startswith("--- ") or line.startswith("+++ "):
+                path_part = line[4:].strip()
+                if path_part.startswith("a/"):
+                    path_part = path_part[2:]
+                elif path_part.startswith("b/"):
+                    path_part = path_part[2:]
+                if path_part != "/dev/null":
+                    patch_file_paths.add(path_part)
+        
+        if not patch_file_paths:
+            return "Patch does not modify any files"
+        
+        # Check if patch is trivial (only whitespace/formatting changes)
+        # Count non-whitespace changes
+        non_whitespace_changes = 0
+        for line in patch.split("\n"):
+            if line.startswith("+") and not line.startswith("+++"):
+                # Count lines that add non-whitespace content
+                content = line[1:].rstrip()
+                if content and not content.isspace():
+                    non_whitespace_changes += 1
+            elif line.startswith("-") and not line.startswith("---"):
+                # Count lines that remove non-whitespace content
+                content = line[1:].rstrip()
+                if content and not content.isspace():
+                    non_whitespace_changes += 1
+        
+        # If only whitespace changes, reject
+        if non_whitespace_changes == 0:
+            return f"Patch only contains whitespace/formatting changes. Milestone '{milestone['title']}' requires actual feature implementation."
+        
+        # Check if patch touches relevant files based on milestone spec
+        spec = milestone.get("spec", {})
+        scope_in = spec.get("scope_in", [])
+        
+        # For this milestone, we expect changes to screens/components/lib files
+        # Check if any scope_in mentions UI/screen/component/preview
+        requires_ui = any(
+            keyword in str(scope_in).lower()
+            for keyword in ["panel", "screen", "ui", "preview", "component"]
+        )
+        
+        if requires_ui:
+            # Check if patch touches screen or component files
+            touches_ui = any(
+                "/screens/" in path or "/components/" in path
+                for path in patch_file_paths
+            )
+            
+            if not touches_ui:
+                return f"Milestone requires UI changes (panel/screen/component), but patch only touches: {list(patch_file_paths)[:3]}. Expected changes to screen or component files."
+        
+        # Check if milestone requires engine/lib changes
+        requires_engine = any(
+            keyword in str(scope_in).lower()
+            for keyword in ["engine", "generator", "dry-run", "compute"]
+        )
+        
+        if requires_engine:
+            # Check if patch touches lib/training files
+            touches_engine = any(
+                "/lib/training/" in path
+                for path in patch_file_paths
+            )
+            
+            # If it only touches types.ts with minimal changes, that's not enough
+            only_types = all(
+                path.endswith("types.ts") for path in patch_file_paths
+            )
+            
+            if only_types and non_whitespace_changes < 10:
+                return f"Milestone requires engine/generator changes, but patch only makes minimal changes to types.ts. Expected implementation of preview computation logic."
+        
+        return None  # Validation passed
+
     # -------------------------
     # Modes
     # -------------------------
