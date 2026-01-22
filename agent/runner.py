@@ -838,9 +838,12 @@ See diff for details.
                     if "preview" in title_lower:
                         priority_keywords.extend(["preview", "Preview"])
                     
-                    # Sort candidates: files with priority keywords first
+                    # Always prioritize types.ts files - they're critical for type safety
                     def priority_score(path: str) -> int:
                         score = 0
+                        # Types files get highest priority
+                        if path.endswith("types.ts") or "/types.ts" in path:
+                            score += 50
                         for keyword in priority_keywords:
                             if keyword in path:
                                 score += 10

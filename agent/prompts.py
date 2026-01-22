@@ -152,6 +152,14 @@ RULES:
 - Check the milestone spec for "scope_out" - it explicitly lists what NOT to change
 - The milestone says "No changes to training engine behavior" - this means preserve ALL existing engine functionality
 
+⚠️ CRITICAL: VERIFY TYPE DEFINITIONS BEFORE USING PROPERTIES ⚠️
+- Before accessing any property on a type (e.g., `set.isAmrap`), check the type definition in the types.ts file
+- The FILE CONTENTS section includes type definitions - use them to see what properties actually exist
+- If a property doesn't exist in the type, you must find the correct way to access that information
+- For example, if checking for AMRAP, look at the PlannedSet type definition to see how AMRAP is represented
+- DO NOT assume property names - always verify against the actual type definitions provided
+- TypeScript errors will cause the patch to fail, so accuracy is critical
+
 EXAMPLE (this is the ONLY format you should use):
 ===FILE_START: app/src/example.ts===
 // Example file
