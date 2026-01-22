@@ -308,26 +308,22 @@ app/
         except Exception:
             return None
         
-        # Calculate relative path from repo root
+        # Calculate relative path from repo root using os.path.relpath (more reliable)
+        import os
         try:
-            # Ensure both paths are absolute for relative_to() to work
-            abs_file_path = file_path.resolve() if file_path.exists() else file_path
-            if not abs_file_path.is_absolute():
-                # If not absolute, make it relative to repo_path
-                abs_file_path = (self.repo_path / abs_file_path).resolve()
+            # Convert to absolute paths
+            if file_path.is_absolute():
+                abs_file_path = file_path
+            else:
+                abs_file_path = file_path.resolve()
             
             abs_repo_path = self.repo_path.resolve()
             
-            # Try relative_to
-            try:
-                rel_path = abs_file_path.relative_to(abs_repo_path)
-            except ValueError:
-                # If relative_to fails, use os.path.relpath as fallback
-                import os
-                rel_path_str = os.path.relpath(str(abs_file_path), str(abs_repo_path))
-                rel_path = Path(rel_path_str)
-        except Exception as e:
-            # Last resort: extract relative path from string representation
+            # Use os.path.relpath for reliable relative path calculation
+            rel_path_str = os.path.relpath(str(abs_file_path), str(abs_repo_path))
+            rel_path = Path(rel_path_str)
+        except Exception:
+            # Fallback: extract relative path from string representation
             file_str = str(file_path)
             # If it contains 'app/src/', extract everything after that
             if 'app/src/' in file_str:
@@ -337,7 +333,6 @@ app/
                 rel_path = Path(file_str)
             else:
                 # Can't determine relative path, skip this file
-                # Debug logging would go here if needed
                 return None
         
         item = {
