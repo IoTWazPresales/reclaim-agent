@@ -962,23 +962,48 @@ See diff for details.
             self._fail(f"Failed to prepare branch {branch_name} in milestone mode")
             return None
 
-        # Validate that patch touches at least one target file (if target_files are specified)
-        if milestone.get("target_files"):
-            import re
-            # Extract all file paths from the patch
-            patch_file_paths = set()
-            for line in patch.split("\n"):
+        # Try new file content format first (===FILE_START: path=== ... ===FILE_END: path===)
+        # If that fails, check if it's unified diff format and reject it with helpful error
+        actual_patch = patch
+        parse_success, parse_error, generated_diff = self._parse_file_content_format(patch, self.repo_path)
+        
+        # Extract file paths from patch (either from file content format or unified diff)
+        patch_file_paths = set()
+        if parse_success and generated_diff:
+            # Extract from generated unified diff
+            for line in generated_diff.split("\n"):
                 if line.startswith("--- ") or line.startswith("+++ "):
-                    # Extract path: --- a/path or +++ b/path or --- /dev/null or --- path
                     path_part = line[4:].strip()
-                    # Normalize: remove a/ or b/ prefix, handle /dev/null
                     if path_part.startswith("a/"):
                         path_part = path_part[2:]
                     elif path_part.startswith("b/"):
                         path_part = path_part[2:]
                     if path_part != "/dev/null":
                         patch_file_paths.add(path_part)
-
+        else:
+            # Try to extract from file content format
+            import re
+            file_pattern = re.compile(r'===FILE_START:\s*(.+?)===', re.MULTILINE)
+            for match in file_pattern.finditer(patch):
+                file_path = match.group(1).strip()
+                if file_path.startswith("/"):
+                    file_path = file_path[1:]
+                patch_file_paths.add(file_path)
+            
+            # If no file content format found, try unified diff format
+            if not patch_file_paths:
+                for line in patch.split("\n"):
+                    if line.startswith("--- ") or line.startswith("+++ "):
+                        path_part = line[4:].strip()
+                        if path_part.startswith("a/"):
+                            path_part = path_part[2:]
+                        elif path_part.startswith("b/"):
+                            path_part = path_part[2:]
+                        if path_part != "/dev/null":
+                            patch_file_paths.add(path_part)
+        
+        # Validate that patch touches at least one target file (if target_files are specified)
+        if milestone.get("target_files") and patch_file_paths:
             # Get all allowed target files
             allowed_files = set()
             for pattern in milestone["target_files"]:
@@ -994,7 +1019,7 @@ See diff for details.
                             allowed_files.add(rel_path.strip())
 
             # Check if any patch file matches allowed files
-            if patch_file_paths and allowed_files:
+            if allowed_files:
                 matches = patch_file_paths.intersection(allowed_files)
                 if not matches:
                     # None of the files in the patch are in the allowed target_files
@@ -1005,13 +1030,8 @@ See diff for details.
                         f"Patch touches files outside target_files: {list(patch_file_paths)[:3]}. Must only modify files matching {milestone['target_files']}"
                     )
                     self.config.save()
-                    self._fail(f"Patch does not touch any allowed target files")
+                    self._fail(f"Patch does not touch any allowed target files. Patch files: {list(patch_file_paths)}, Allowed patterns: {milestone['target_files']}")
                     return None
-
-        # Try new file content format first (===FILE_START: path=== ... ===FILE_END: path===)
-        # If that fails, check if it's unified diff format and reject it with helpful error
-        actual_patch = patch
-        parse_success, parse_error, generated_diff = self._parse_file_content_format(patch, self.repo_path)
         if parse_success and generated_diff:
             print("Successfully parsed file content format, using generated diff")
             actual_patch = generated_diff
