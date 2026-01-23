@@ -218,7 +218,7 @@ class Runner:
         # Pattern to match file blocks - be flexible with whitespace and path matching
         # Match FILE_START with path, then content, then FILE_END with same path (flexible whitespace)
         file_pattern = re.compile(
-            r'===FILE_START:\s*(.+?)\s*===\s*\n(.*?)\n===FILE_END:\s*\1\s*===',
+            r'===FILE_START:\s*(.+?)\s*===\s*\n(.*?)(?:\n)?===FILE_END:\s*\1\s*===',
             re.DOTALL | re.MULTILINE
         )
         
@@ -659,7 +659,7 @@ class Runner:
 
         print("Calling OpenAI API for fix patch...")
         try:
-            patch = call_openai(prompt, self.config.openai_api_key)
+            patch = call_openai(prompt, self.config.openai_api_key, response_format="diff")
         except Exception as e:
             print("Failed to generate patch (exception thrown during fix mode)")
             if self._debug_enabled():
@@ -1002,7 +1002,7 @@ See diff for details.
 
         print("Calling OpenAI API for milestone patch...")
         try:
-            patch = call_openai(prompt, self.config.openai_api_key)
+            patch = call_openai(prompt, self.config.openai_api_key, response_format="diff")
         except Exception as e:
             print("Failed to generate patch (exception thrown in milestone mode)")
             if self._debug_enabled():
@@ -1036,13 +1036,26 @@ See diff for details.
         branch_slug = milestone_id.replace("_", "-")
         branch_name = f"agent/{datetime.now().strftime('%Y%m%d')}-{branch_slug}"
 
-        # Idempotency: if a PR already exists for this milestone branch, do not recreate it.
         existing_pr = self.github.get_pr_by_branch(branch_name)
         if existing_pr:
-            print(f"Existing PR for milestone found, marking as done: {existing_pr['html_url']}")
-            update_milestone_status(self.config.milestones, milestone_id, "done")
-            self.config.save()
-            return existing_pr.get("html_url")
+            pr_number = existing_pr.get("number")
+            pr_state = existing_pr.get("state")
+            pr_merged = bool(existing_pr.get("merged_at")) or existing_pr.get("merged") is True
+
+            if pr_state == "closed" and not pr_merged:
+                print(f"Existing PR for milestone is closed without merge; continuing: {existing_pr.get('html_url')}")
+            else:
+                pr_diff = self.github.get_pr_diff(pr_number) if pr_number else None
+                if not pr_diff or not pr_diff.strip():
+                    print(f"Existing PR diff is empty; continuing: {existing_pr.get('html_url')}")
+                else:
+                    validation_error = self._validate_milestone_patch(pr_diff, milestone)
+                    if not validation_error:
+                        print(f"Existing PR appears to satisfy milestone; marking as done: {existing_pr.get('html_url')}")
+                        update_milestone_status(self.config.milestones, milestone_id, "done")
+                        self.config.save()
+                        return existing_pr.get("html_url")
+                    print(f"Existing PR did not satisfy milestone; continuing: {validation_error}")
 
         if not self._ensure_branch_checked_out(branch_name, self.config.default_branch):
             update_milestone_status(self.config.milestones, milestone_id, "blocked", f"Failed to prepare branch {branch_name}")

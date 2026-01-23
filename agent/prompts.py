@@ -329,9 +329,16 @@ def _is_incomplete_max_tokens(payload: dict) -> bool:
 # OpenAI call
 # ---------------------------
 
-def call_openai(prompt: str, api_key: str) -> Optional[str]:
+def _sanitize_output(text: str, response_format: str) -> str:
+    if response_format == "diff":
+        return _sanitize_to_unified_diff(text)
+    return text.strip()
+
+
+def call_openai(prompt: str, api_key: str, response_format: str = "diff") -> Optional[str]:
     """
-    Call OpenAI Responses API with prompt and return the response text (expected: unified diff).
+    Call OpenAI Responses API with prompt and return the response text.
+    response_format: "diff" for unified diff, "file" for ===FILE_START=== blocks.
     Returns None on failure.
     """
     import requests
@@ -371,12 +378,19 @@ def call_openai(prompt: str, api_key: str) -> Optional[str]:
     verbosity = os.getenv("OPENAI_TEXT_VERBOSITY", "").strip() or None
 
     # Base request body (Responses API)
+    system_prompt = (
+        "You output a valid unified diff patch starting with '--- a/...'. "
+        "Preserve all existing functionality when modifying files."
+        if response_format == "diff"
+        else "You output complete file content using ===FILE_START: path=== ... ===FILE_END: path=== format. "
+        "Preserve all existing functionality when modifying files."
+    )
     data: Dict[str, Any] = {
         "model": model,
         "input": [
             {
                 "role": "system",
-                "content": "You output complete file content using ===FILE_START: path=== ... ===FILE_END: path=== format. Preserve all existing functionality when modifying files.",
+                "content": system_prompt,
             },
             {"role": "user", "content": prompt},
         ],
@@ -428,7 +442,7 @@ def call_openai(prompt: str, api_key: str) -> Optional[str]:
 
                 # If we got something, sanitize to diff and return.
                 if content and content.strip():
-                    clean = _sanitize_to_unified_diff(content)
+                    clean = _sanitize_output(content, response_format)
                     return clean.strip() if clean and clean.strip() else None
 
                 # If we got no text but the response is incomplete due to token cap,
@@ -450,10 +464,15 @@ def call_openai(prompt: str, api_key: str) -> Optional[str]:
                         _dbg("[AGENT_DEBUG] Still no text at token cap; attempting continuation via previous_response_id.")
                         cont_data = dict(data)
                         cont_data["previous_response_id"] = resp_id
+                        continuation_instruction = (
+                            "Continue. Output ONLY the unified diff patch starting with '--- a/...'."
+                            if response_format == "diff"
+                            else "Continue. Output ONLY complete file content using ===FILE_START: path=== ... ===FILE_END: path=== format."
+                        )
                         cont_data["input"] = [
                             {
                                 "role": "user",
-                                "content": "Continue. Output ONLY the unified diff patch starting with '--- a/...'.",
+                                "content": continuation_instruction,
                             }
                         ]
                         # more time for continuation
@@ -465,7 +484,7 @@ def call_openai(prompt: str, api_key: str) -> Optional[str]:
                             cont_preview = (cont_text[:400] if cont_text else "").replace("\n", "\\n")
                             _dbg(f"[AGENT_DEBUG] Continuation content preview (first 400 chars): {cont_preview}")
                             if cont_text and cont_text.strip():
-                                clean2 = _sanitize_to_unified_diff(cont_text)
+                                clean2 = _sanitize_output(cont_text, response_format)
                                 return clean2.strip() if clean2 and clean2.strip() else None
 
                 # No usable content

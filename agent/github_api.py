@@ -127,3 +127,12 @@ class GitHubAPI:
             if prs:
                 return prs[0]
         return None
+
+    def get_pr_diff(self, pr_number: int) -> Optional[str]:
+        """Get unified diff content for a PR."""
+        url = f"{self.base_url}/repos/{self.repo}/pulls/{pr_number}"
+        headers = {**self.headers, "Accept": "application/vnd.github.v3.diff"}
+        response = requests.get(url, headers=headers)
+        if response.status_code == 200:
+            return response.text
+        return None
