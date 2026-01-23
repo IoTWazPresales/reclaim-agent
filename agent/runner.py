@@ -1162,6 +1162,10 @@ See diff for details.
             retry_instructions += "3. Include the COMPLETE implementation of all existing functions\n"
             retry_instructions += "4. Then ADD your new functionality at the end\n"
             retry_instructions += "5. Count the lines - your output must match or exceed the original file size\n"
+            retry_instructions += "6. DO NOT refactor, simplify, or modify existing code - copy it EXACTLY as-is\n"
+            retry_instructions += "7. DO NOT condense multi-line functions into single lines\n"
+            retry_instructions += "8. DO NOT change variable names, comments, or code style\n"
+            retry_instructions += "9. If you see existing code, COPY IT EXACTLY - do not 'improve' it\n"
             
             # Get a snippet of the original file to remind the model
             if file_sizes:
