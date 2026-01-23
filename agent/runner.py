@@ -1002,7 +1002,7 @@ See diff for details.
 
         print("Calling OpenAI API for milestone patch...")
         try:
-            patch = call_openai(prompt, self.config.openai_api_key, response_format="diff")
+            patch = call_openai(prompt, self.config.openai_api_key, response_format="file")
         except Exception as e:
             print("Failed to generate patch (exception thrown in milestone mode)")
             if self._debug_enabled():
