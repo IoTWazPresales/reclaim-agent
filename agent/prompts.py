@@ -163,6 +163,15 @@ RULES:
 - Check the milestone spec for "scope_out" - it explicitly lists what NOT to change
 - The milestone says "No changes to training engine behavior" - this means preserve ALL existing engine functionality
 
+🚨 CRITICAL: COPY THE EXACT EXISTING FILE CONTENT 🚨
+- For files marked "FULL CONTENT" in the REPOSITORY CONTEXT section, you MUST copy the ENTIRE file exactly as shown
+- DO NOT rewrite, simplify, or replace the file - copy it line-by-line, then ADD your changes
+- If the file shows 985 lines in "FULL CONTENT", your output MUST also be ~985+ lines (original + additions)
+- DO NOT create "lightweight" versions, "stubs", or "declarations" - output the COMPLETE implementation
+- If you see "declare function" in your output, you're doing it WRONG - output the actual function implementations
+- The validation will REJECT your patch if the file size is suspiciously small (< 500 lines for engine files)
+- Example: If engine/index.ts has 985 lines and you need to add a preview function, output ALL 985 original lines PLUS your new preview function (~1000+ lines total)
+
 ⚠️ CRITICAL: VERIFY TYPE DEFINITIONS BEFORE USING PROPERTIES ⚠️
 - Before accessing any property on a type (e.g., `set.isAmrap`), check the type definition in the types.ts file
 - The FILE CONTENTS section includes type definitions - use them to see what properties actually exist
