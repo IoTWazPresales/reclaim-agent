@@ -518,18 +518,62 @@ class Runner:
         
         # Extract file paths from patch
         patch_file_paths = set()
+        file_stats = {}  # path -> {additions: int, deletions: int}
+        
+        current_file = None
         for line in patch.split("\n"):
-            if line.startswith("--- ") or line.startswith("+++ "):
+            if line.startswith("--- "):
                 path_part = line[4:].strip()
                 if path_part.startswith("a/"):
                     path_part = path_part[2:]
                 elif path_part.startswith("b/"):
                     path_part = path_part[2:]
                 if path_part != "/dev/null":
+                    current_file = path_part
                     patch_file_paths.add(path_part)
+                    if current_file not in file_stats:
+                        file_stats[current_file] = {"additions": 0, "deletions": 0}
+            elif line.startswith("+++ "):
+                path_part = line[4:].strip()
+                if path_part.startswith("a/"):
+                    path_part = path_part[2:]
+                elif path_part.startswith("b/"):
+                    path_part = path_part[2:]
+                if path_part != "/dev/null":
+                    current_file = path_part
+                    patch_file_paths.add(path_part)
+                    if current_file not in file_stats:
+                        file_stats[current_file] = {"additions": 0, "deletions": 0}
+            elif current_file and line.startswith("+"):
+                if not line.startswith("+++"):
+                    content = line[1:].rstrip()
+                    if content and not content.isspace():
+                        file_stats[current_file]["additions"] += 1
+            elif current_file and line.startswith("-"):
+                if not line.startswith("---"):
+                    content = line[1:].rstrip()
+                    if content and not content.isspace():
+                        file_stats[current_file]["deletions"] += 1
         
         if not patch_file_paths:
             return "Patch does not modify any files"
+        
+        # Check for excessive deletions (file replacement)
+        for file_path, stats in file_stats.items():
+            deletions = stats["deletions"]
+            additions = stats["additions"]
+            
+            # If a file loses more than 50% of its content (heuristic: >500 deletions), it's likely a replacement
+            if deletions > 500:
+                # Check if it's a critical file that shouldn't be replaced
+                if "/engine/" in file_path or "/lib/training/" in file_path:
+                    if additions < deletions * 0.5:  # Less than 50% of deletions are additions
+                        return (
+                            f"Patch appears to replace entire file '{file_path}' ({deletions} deletions, {additions} additions). "
+                            f"This violates the 'PRESERVE ALL EXISTING FUNCTIONALITY' rule. "
+                            f"The milestone requires ADDING new functionality, not replacing existing code. "
+                            f"Please preserve all existing exports and functions, only ADD new code."
+                        )
         
         # Check if patch is trivial (only whitespace/formatting changes)
         # Count non-whitespace changes
@@ -553,6 +597,19 @@ class Runner:
         # Check if patch touches relevant files based on milestone spec
         spec = milestone.get("spec", {})
         scope_in = spec.get("scope_in", [])
+        scope_out = spec.get("scope_out", [])
+        
+        # Check scope_out - if it says "No changes to training engine behavior", reject patches that heavily modify engine files
+        if any("engine" in str(scope_out).lower() or "training engine" in str(scope_out).lower() for _ in [1]):
+            for file_path in patch_file_paths:
+                if "/engine/" in file_path or file_path.endswith("/engine/index.ts"):
+                    stats = file_stats.get(file_path, {"additions": 0, "deletions": 0})
+                    if stats["deletions"] > 100:  # Significant deletions in engine file
+                        return (
+                            f"Patch modifies '{file_path}' with {stats['deletions']} deletions. "
+                            f"The milestone spec explicitly states 'No changes to training engine behavior'. "
+                            f"You must preserve ALL existing engine functionality and only ADD new preview/dry-run features."
+                        )
         
         # For this milestone, we expect changes to screens/components/lib files
         # Check if any scope_in mentions UI/screen/component/preview
@@ -1063,6 +1120,15 @@ See diff for details.
             self._fail(f"Failed to prepare branch {branch_name} in milestone mode")
             return None
 
+        # Validate that patch actually addresses milestone requirements BEFORE applying
+        # Parse the diff to check for file replacements
+        validation_error = self._validate_milestone_patch_before_apply(patch, milestone)
+        if validation_error:
+            update_milestone_status(self.config.milestones, milestone_id, "blocked", validation_error)
+            self.config.save()
+            self._fail(f"Patch validation failed before applying: {validation_error}")
+            return None
+
         # Try new file content format first (===FILE_START: path=== ... ===FILE_END: path===)
         # If that fails, check if it's unified diff format and reject it with helpful error
         actual_patch = patch
@@ -1172,6 +1238,52 @@ See diff for details.
             self.config.save()
             self._fail(f"Patch validation failed: {validation_error}")
             return None
+
+    def _validate_milestone_patch_before_apply(self, content: str, milestone: Dict[str, Any]) -> Optional[str]:
+        """
+        Validate file content format BEFORE parsing/applying to catch file replacements early.
+        Returns error message if validation fails, None if valid.
+        """
+        import re
+        
+        # Check if it's file content format
+        file_pattern = re.compile(
+            r'===FILE_START:\s*(.+?)\s*===\s*\n(.*?)(?:\n)?===FILE_END:\s*\1\s*===',
+            re.DOTALL | re.MULTILINE
+        )
+        
+        matches = list(file_pattern.finditer(content))
+        if not matches:
+            return None  # Not file content format, let other validation handle it
+        
+        # For each file block, check if it's suspiciously small (indicating replacement)
+        for match in matches:
+            file_path = match.group(1).strip()
+            file_content = match.group(2)
+            
+            # Normalize path
+            if file_path.startswith("/"):
+                file_path = file_path[1:]
+            
+            # Check if this is a critical file that shouldn't be replaced
+            if "/engine/" in file_path or file_path.endswith("/engine/index.ts"):
+                # Count lines in the new content
+                new_line_count = len([l for l in file_content.split("\n") if l.strip()])
+                
+                # If the new file is suspiciously small (< 500 lines for an engine file), it's likely a replacement
+                if new_line_count < 500:
+                    spec = milestone.get("spec", {})
+                    scope_out = spec.get("scope_out", [])
+                    
+                    if any("engine" in str(scope_out).lower() or "training engine" in str(scope_out).lower() for _ in [1]):
+                        return (
+                            f"File '{file_path}' appears to be replaced (only {new_line_count} lines in new version). "
+                            f"The milestone spec explicitly states 'No changes to training engine behavior'. "
+                            f"You must preserve ALL existing engine functionality and only ADD new preview/dry-run features. "
+                            f"Please output the COMPLETE file with all existing code preserved, plus your additions."
+                        )
+        
+        return None  # Validation passed
 
         print("Verifying acceptance criteria...")
         # Acceptance commands are assumed relative to repo root; they can do their own `cd`.
