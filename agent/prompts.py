@@ -163,6 +163,17 @@ RULES:
 - Check the milestone spec for "scope_out" - it explicitly lists what NOT to change
 - The milestone says "No changes to training engine behavior" - this means preserve ALL existing engine functionality
 
+🚨 CRITICAL: DO NOT REFACTOR OR MODIFY EXISTING CODE 🚨
+- DO NOT refactor, simplify, condense, or "improve" existing functions
+- DO NOT change the style, formatting, or structure of existing code
+- DO NOT combine multiple lines into one line
+- DO NOT rename variables or change function implementations
+- COPY existing code EXACTLY as-is, character-by-character, line-by-line
+- ONLY add new code - never modify existing code unless the milestone explicitly requires it
+- If you see existing code that could be "improved", IGNORE IT - preserve it exactly as shown
+- Example: If `getEquipmentClass` has 20 lines with comments, keep ALL 20 lines exactly as-is. Do NOT condense it to 5 lines.
+- The validation will REJECT patches with >100 deletions in engine files - this means you're modifying existing code when you should only ADD
+
 🚨 CRITICAL: COPY THE EXACT EXISTING FILE CONTENT 🚨
 - For files marked "FULL CONTENT" in the REPOSITORY CONTEXT section, you MUST copy the ENTIRE file exactly as shown
 - DO NOT rewrite, simplify, or replace the file - copy it line-by-line, then ADD your changes
