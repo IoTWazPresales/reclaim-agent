@@ -993,6 +993,24 @@ See diff for details.
                     
                     all_matching_files.sort(key=priority_score, reverse=True)
                     
+                    # Build set of files that MUST get full content (critical files)
+                    force_full_paths: set[str] = set()
+                    spec = milestone.get("spec", {})
+                    scope_out = spec.get("scope_out", [])
+                    scope_in = spec.get("scope_in", [])
+                    title_lower = milestone.get("title", "").lower()
+                    
+                    # If milestone mentions engine or has "No changes to training engine behavior"
+                    if any("engine" in str(scope_out).lower() or "training engine" in str(scope_out).lower() for _ in [1]) or \
+                       any("engine" in str(scope_in).lower() for _ in [1]) or \
+                       "engine" in title_lower:
+                        # Force full content for all engine files
+                        for rel_path in all_matching_files:
+                            if "/lib/training/engine/" in rel_path or rel_path.endswith("/engine/index.ts"):
+                                force_full_paths.add(rel_path)
+                                if self._debug_enabled():
+                                    print(f"[AGENT_DEBUG] Forcing full content for critical engine file: {rel_path}")
+                    
                     # Read files: full content for top priority, truncated for others
                     for idx, rel_path in enumerate(all_matching_files[:max_files_total]):
                         if total_chars >= max_total_chars:
@@ -1004,8 +1022,8 @@ See diff for details.
                             text = file_path.read_text(encoding="utf-8")
                             file_lines = text.count('\n') + (1 if text else 0)
                             
-                            # Top priority files get FULL content (no truncation)
-                            is_full_file = idx < max_files_full
+                            # Top priority files OR forced-full files get FULL content (no truncation)
+                            is_full_file = idx < max_files_full or rel_path in force_full_paths
                             
                             if is_full_file:
                                 # Full file content - critical for accurate line numbers
@@ -1122,12 +1140,71 @@ See diff for details.
 
         # Validate that patch actually addresses milestone requirements BEFORE applying
         # Parse the diff to check for file replacements
-        validation_error = self._validate_milestone_patch_before_apply(patch, milestone)
+        validation_error, file_sizes = self._validate_milestone_patch_before_apply(patch, milestone, self.repo_path)
         if validation_error:
-            update_milestone_status(self.config.milestones, milestone_id, "blocked", validation_error)
-            self.config.save()
-            self._fail(f"Patch validation failed before applying: {validation_error}")
-            return None
+            # Step C: Retry once with enhanced error message
+            print(f"Initial validation failed: {validation_error}")
+            print("Retrying with enhanced instructions...")
+            
+            # Build enhanced retry prompt with file size info
+            retry_instructions = f"\n\n🚨 CRITICAL RETRY INSTRUCTION 🚨\n"
+            retry_instructions += f"Your previous output was REJECTED because:\n{validation_error}\n\n"
+            
+            if file_sizes:
+                retry_instructions += "FILE SIZE REQUIREMENTS:\n"
+                for file_path, (orig_lines, new_lines) in file_sizes.items():
+                    if orig_lines and new_lines and new_lines < orig_lines:
+                        retry_instructions += f"- {file_path}: Original has {orig_lines} lines, you output {new_lines} lines. You MUST output ALL {orig_lines}+ lines.\n"
+            
+            retry_instructions += "\nYOU MUST:\n"
+            retry_instructions += "1. Output the ENTIRE existing file content line-by-line\n"
+            retry_instructions += "2. NO abbreviations, NO placeholders, NO 'declare function' stubs\n"
+            retry_instructions += "3. Include the COMPLETE implementation of all existing functions\n"
+            retry_instructions += "4. Then ADD your new functionality at the end\n"
+            retry_instructions += "5. Count the lines - your output must match or exceed the original file size\n"
+            
+            # Get a snippet of the original file to remind the model
+            if file_sizes:
+                for file_path, (orig_lines, new_lines) in file_sizes.items():
+                    if orig_lines and new_lines and new_lines < orig_lines:
+                        actual_file = self.repo_path / file_path
+                        if actual_file.exists() and actual_file.is_file():
+                            try:
+                                original_text = actual_file.read_text(encoding="utf-8")
+                                # Show first 50 lines as a reminder
+                                first_lines = "\n".join(original_text.split("\n")[:50])
+                                retry_instructions += f"\nREMINDER - First 50 lines of {file_path}:\n{first_lines}\n...\n"
+                            except Exception:
+                                pass
+            
+            # Retry with enhanced prompt
+            retry_prompt = prompt + retry_instructions
+            try:
+                retry_patch = call_openai(retry_prompt, self.config.openai_api_key, response_format="file")
+            except Exception as e:
+                print(f"Retry failed with exception: {e}")
+                update_milestone_status(self.config.milestones, milestone_id, "blocked", f"{validation_error} (retry also failed)")
+                self.config.save()
+                self._fail(f"Patch validation failed before applying: {validation_error}")
+                return None
+            
+            if not retry_patch:
+                update_milestone_status(self.config.milestones, milestone_id, "blocked", f"{validation_error} (retry returned empty)")
+                self.config.save()
+                self._fail(f"Patch validation failed before applying: {validation_error}")
+                return None
+            
+            # Validate the retry patch
+            retry_validation_error, _ = self._validate_milestone_patch_before_apply(retry_patch, milestone, self.repo_path)
+            if retry_validation_error:
+                update_milestone_status(self.config.milestones, milestone_id, "blocked", f"{validation_error} (retry also failed: {retry_validation_error})")
+                self.config.save()
+                self._fail(f"Patch validation failed after retry: {retry_validation_error}")
+                return None
+            
+            # Retry succeeded - use the retry patch
+            print("Retry validation passed, using retry patch")
+            patch = retry_patch
 
         # Try new file content format first (===FILE_START: path=== ... ===FILE_END: path===)
         # If that fails, check if it's unified diff format and reject it with helpful error
@@ -1239,10 +1316,10 @@ See diff for details.
             self._fail(f"Patch validation failed: {validation_error}")
             return None
 
-    def _validate_milestone_patch_before_apply(self, content: str, milestone: Dict[str, Any]) -> Optional[str]:
+    def _validate_milestone_patch_before_apply(self, content: str, milestone: Dict[str, Any], repo_path: Optional[Path] = None) -> Tuple[Optional[str], Optional[Dict[str, int]]]:
         """
         Validate file content format BEFORE parsing/applying to catch file replacements early.
-        Returns error message if validation fails, None if valid.
+        Returns: (error_message, file_sizes_dict) where file_sizes_dict maps file_path -> (original_lines, new_lines)
         """
         import re
         
@@ -1254,7 +1331,9 @@ See diff for details.
         
         matches = list(file_pattern.finditer(content))
         if not matches:
-            return None  # Not file content format, let other validation handle it
+            return None, None  # Not file content format, let other validation handle it
+        
+        file_sizes = {}
         
         # For each file block, check if it's suspiciously small (indicating replacement)
         for match in matches:
@@ -1265,27 +1344,43 @@ See diff for details.
             if file_path.startswith("/"):
                 file_path = file_path[1:]
             
+            # Count lines in the new content
+            new_line_count = len([l for l in file_content.split("\n") if l.strip()])
+            
+            # Get original file size if available
+            original_line_count = None
+            if repo_path:
+                actual_file = repo_path / file_path
+                if actual_file.exists() and actual_file.is_file():
+                    try:
+                        original_text = actual_file.read_text(encoding="utf-8")
+                        original_line_count = len([l for l in original_text.split("\n") if l.strip()])
+                    except Exception:
+                        pass
+            
+            file_sizes[file_path] = (original_line_count, new_line_count)
+            
             # Check if this is a critical file that shouldn't be replaced
             if "/engine/" in file_path or file_path.endswith("/engine/index.ts"):
-                # Count lines in the new content
-                new_line_count = len([l for l in file_content.split("\n") if l.strip()])
-                
                 # If the new file is suspiciously small (< 500 lines for an engine file), it's likely a replacement
                 if new_line_count < 500:
                     spec = milestone.get("spec", {})
                     scope_out = spec.get("scope_out", [])
                     
                     if any("engine" in str(scope_out).lower() or "training engine" in str(scope_out).lower() for _ in [1]):
-                        return (
-                            f"File '{file_path}' appears to be replaced (only {new_line_count} lines in new version). "
-                            f"The milestone spec explicitly states 'No changes to training engine behavior'. "
+                        error_msg = (
+                            f"File '{file_path}' appears to be replaced (only {new_line_count} lines in new version"
+                        )
+                        if original_line_count:
+                            error_msg += f", original file has {original_line_count} lines"
+                        error_msg += (
+                            f"). The milestone spec explicitly states 'No changes to training engine behavior'. "
                             f"You must preserve ALL existing engine functionality and only ADD new preview/dry-run features. "
                             f"Please output the COMPLETE file with all existing code preserved, plus your additions."
                         )
+                        return error_msg, file_sizes
         
-        return None  # Validation passed
-
-        print("Verifying acceptance criteria...")
+        return None, file_sizes  # Validation passed
         # Acceptance commands are assumed relative to repo root; they can do their own `cd`.
         app_path = self.repo_path
         for cmd in milestone.get("acceptance", []):

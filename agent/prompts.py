@@ -171,6 +171,8 @@ RULES:
 - If you see "declare function" in your output, you're doing it WRONG - output the actual function implementations
 - The validation will REJECT your patch if the file size is suspiciously small (< 500 lines for engine files)
 - Example: If engine/index.ts has 985 lines and you need to add a preview function, output ALL 985 original lines PLUS your new preview function (~1000+ lines total)
+- ⚠️ CRITICAL: If you output a file shorter than the existing file, the patch will be REJECTED. You MUST include the entire file.
+- Count the lines in the "FULL CONTENT" section - your output must match or exceed that line count. If the file shows "985 lines", your output must be 985+ lines.
 
 ⚠️ CRITICAL: VERIFY TYPE DEFINITIONS BEFORE USING PROPERTIES ⚠️
 - Before accessing any property on a type (e.g., `set.isAmrap`), check the type definition in the types.ts file
